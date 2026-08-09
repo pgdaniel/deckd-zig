@@ -145,7 +145,9 @@ pub fn setKeyImage(dev: *hid.Device, key: u8, jpeg: []const u8) !void {
     var off: usize = 0;
     while (off < jpeg.len or page == 0) {
         var report: [report_len]u8 = std.mem.zeroes([report_len]u8);
-        const chunk = @min(jpeg.len -| off, report_len - 8);
+        // usize annotation matters: @min with a comptime bound narrows the
+        // result type, and 8 + chunk must not overflow that narrow type.
+        const chunk: usize = @min(jpeg.len -| off, report_len - 8);
         const last: u8 = if (off + chunk >= jpeg.len) 1 else 0;
         report[0] = 0x02;
         report[1] = 0x07;
@@ -169,7 +171,7 @@ pub fn setStripImage(dev: *hid.Device, x: u16, y: u16, w: u16, h: u16, jpeg: []c
     var off: usize = 0;
     while (off < jpeg.len or page == 0) {
         var report: [report_len]u8 = std.mem.zeroes([report_len]u8);
-        const chunk = @min(jpeg.len -| off, report_len - 16);
+        const chunk: usize = @min(jpeg.len -| off, report_len - 16);
         const last: u8 = if (off + chunk >= jpeg.len) 1 else 0;
         report[0] = 0x02;
         report[1] = 0x0c;
@@ -182,10 +184,12 @@ pub fn setStripImage(dev: *hid.Device, x: u16, y: u16, w: u16, h: u16, jpeg: []c
         report[8] = @truncate(h);
         report[9] = @truncate(h >> 8);
         report[10] = last;
-        report[11] = @truncate(chunk);
-        report[12] = @truncate(chunk >> 8);
-        report[13] = @truncate(page);
-        report[14] = @truncate(page >> 8);
+        // Strip header order is page THEN bytecount (verified against
+        // python-elgato-streamdeck; swapped order garbles the image).
+        report[11] = @truncate(page);
+        report[12] = @truncate(page >> 8);
+        report[13] = @truncate(chunk);
+        report[14] = @truncate(chunk >> 8);
         @memcpy(report[16 .. 16 + chunk], jpeg[off .. off + chunk]);
         try dev.writeReport(&report);
         off += chunk;

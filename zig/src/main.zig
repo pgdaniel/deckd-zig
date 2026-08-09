@@ -1,6 +1,7 @@
 const std = @import("std");
 const hid = @import("hid.zig");
 const deck = @import("deck.zig");
+const image = @import("image.zig");
 
 fn usage() noreturn {
     std.debug.print(
@@ -11,6 +12,7 @@ fn usage() noreturn {
         \\  deckd dump [--device PATH]  hex-dump input reports (press keys, turn dials)
         \\  deckd brightness <0-100>    set panel brightness
         \\  deckd reset                 reset the device
+        \\  deckd test-image            orientation test pattern on all keys + strip
         \\
     , .{});
     std.process.exit(2);
@@ -62,6 +64,47 @@ pub fn main(init: std.process.Init.Minimal) !void {
         var dev = try openDeck(device_arg);
         defer dev.close();
         try deck.reset(&dev);
+    } else if (std.mem.eql(u8, cmd, "test-image")) {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const alloc = arena.allocator();
+        var dev = try openDeck(device_arg);
+        defer dev.close();
+        try deck.setBrightness(&dev, 70);
+
+        // Orientation pattern: corner colors TL=red TR=green BL=yellow
+        // BR=blue, white bar along the top edge, key-index stripes bottom.
+        var key: u8 = 0;
+        while (key < deck.key_count) : (key += 1) {
+            var img = try image.Image.init(alloc, deck.key_px, deck.key_px);
+            img.fill(24, 24, 24);
+            const cs = 30; // corner size
+            img.fillRect(0, 0, cs, cs, 255, 0, 0); // TL red
+            img.fillRect(deck.key_px - cs, 0, cs, cs, 0, 255, 0); // TR green
+            img.fillRect(0, deck.key_px - cs, cs, cs, 255, 255, 0); // BL yellow
+            img.fillRect(deck.key_px - cs, deck.key_px - cs, cs, cs, 0, 0, 255); // BR blue
+            img.fillRect(0, 0, deck.key_px, 6, 255, 255, 255); // top white bar
+            var s: usize = 0;
+            while (s <= key) : (s += 1) img.fillRect(30 + s * 12, 100, 8, 16, 255, 255, 255);
+            var jpeg: std.ArrayList(u8) = .empty;
+            try image.encodeJpeg(&img, 90, &jpeg, alloc);
+            try deck.setKeyImage(&dev, key, jpeg.items);
+            std.debug.print("key {d}: {d} bytes jpeg\n", .{ key, jpeg.items.len });
+        }
+
+        // Strip: left white bar, red→blue horizontal gradient.
+        var strip = try image.Image.init(alloc, deck.strip_w, deck.strip_h);
+        var x: usize = 0;
+        while (x < deck.strip_w) : (x += 1) {
+            const r: u8 = @intCast(255 * (deck.strip_w - x) / deck.strip_w);
+            const b: u8 = @intCast(255 * x / deck.strip_w);
+            strip.fillRect(x, 0, 1, deck.strip_h, r, 0, b);
+        }
+        strip.fillRect(0, 0, 16, deck.strip_h, 255, 255, 255);
+        var jpeg: std.ArrayList(u8) = .empty;
+        try image.encodeJpeg(&strip, 90, &jpeg, alloc);
+        try deck.setStripImage(&dev, 0, 0, deck.strip_w, deck.strip_h, jpeg.items);
+        std.debug.print("strip: {d} bytes jpeg\n", .{jpeg.items.len});
     } else if (std.mem.eql(u8, cmd, "dump")) {
         var dev = try openDeck(device_arg);
         defer dev.close();

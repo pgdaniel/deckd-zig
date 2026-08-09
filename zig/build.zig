@@ -18,6 +18,14 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    mod.addIncludePath(b.path("vendor"));
+    // -fno-sanitize: stb's JPEG bit writer has known-benign shift UB that
+    // zig's Debug-mode UBSan otherwise traps on.
+    mod.addCSourceFile(.{
+        .file = b.path("vendor/stb_image_write_impl.c"),
+        .flags = &.{ "-O2", "-w", "-fno-sanitize=all" },
+    });
+
     const exe = b.addExecutable(.{
         .name = "deckd",
         .root_module = mod,
