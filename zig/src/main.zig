@@ -71,7 +71,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
             const n = (try dev.pollReport(&buf, 10000)) orelse continue;
             const report = buf[0..n];
             std.debug.print("[{d:>3}] ", .{n});
-            for (report) |b| std.debug.print("{x:0>2} ", .{b});
+            for (report[0..@min(n, 16)]) |b| std.debug.print("{x:0>2} ", .{b});
+            if (deck.parseReport(report)) |parsed|
+                std.debug.print(" → {any}", .{parsed});
             std.debug.print("\n", .{});
         }
     } else {
