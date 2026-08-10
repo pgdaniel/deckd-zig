@@ -1,0 +1,416 @@
+//! The deckd daemon: Stream Deck Plus → matrix control API + soma player IPC.
+//!
+//! Pages (knob 4 push cycles them) swap what the 8 keys and the strip show:
+//!   MATRIX — keys direct-select matrix screens (white border = active),
+//!            strip shows screen name / auto-advance / soma now-playing.
+//!   SOMA   — keys are SomaFM channel presets + VIZ + STOP (border = playing),
+//!            strip shows channel / track / volume.
+//!
+//! Knobs (fixed roles on all pages):
+//!   knob 1 rotate: soma volume        push: mute toggle
+//!   knob 2 rotate: soma channel surf  push: play/stop toggle
+//!   knob 3 rotate: matrix screen jog  push: auto-advance toggle
+//!   knob 4 rotate: deck LCD brightness  push: switch page
+//! Strip left/right swipe jogs matrix screens too.
+//!
+//! Memory: transient work (images, JPEGs, HTTP bodies, JSON) uses a per-cycle
+//! arena reset each loop iteration; state that survives an iteration lives in
+//! the fixed buffers below.
+const std = @import("std");
+const hid = @import("hid.zig");
+const deck = @import("deck.zig");
+const image = @import("image.zig");
+const render = @import("render.zig");
+const matrix = @import("matrix.zig");
+const soma = @import("soma.zig");
+
+const Page = enum { matrix, soma };
+
+const KeyAction = struct {
+    label: []const u8,
+    screen: []const u8,
+    r: u8,
+    g: u8,
+    b: u8,
+};
+
+const matrix_keys = [deck.key_count]KeyAction{
+    .{ .label = "WEATHER", .screen = "weather-cyberpunk", .r = 255, .g = 140, .b = 0 },
+    .{ .label = "HIGH", .screen = "high-temp-cyberpunk", .r = 255, .g = 220, .b = 0 },
+    .{ .label = "CLOCK", .screen = "clock-cyberpunk", .r = 0, .g = 220, .b = 255 },
+    .{ .label = "AQI", .screen = "aqi-cyberpunk", .r = 0, .g = 220, .b = 100 },
+    .{ .label = "HUMID", .screen = "humidity-cyberpunk", .r = 60, .g = 120, .b = 255 },
+    .{ .label = "SPECTR", .screen = "spectrum", .r = 255, .g = 0, .b = 220 },
+    .{ .label = "SCOPE", .screen = "oscope", .r = 255, .g = 60, .b = 120 },
+    .{ .label = "MSG", .screen = "message", .r = 220, .g = 220, .b = 220 },
+};
+
+const SomaKey = struct {
+    label: []const u8,
+    id: []const u8, // SomaFM channel id; "viz"/"stop" are special actions
+    r: u8,
+    g: u8,
+    b: u8,
+};
+
+const soma_keys = [deck.key_count]SomaKey{
+    .{ .label = "GROOVE", .id = "groovesalad", .r = 120, .g = 220, .b = 120 },
+    .{ .label = "DRONE", .id = "dronezone", .r = 100, .g = 160, .b = 255 },
+    .{ .label = "DEFCON", .id = "defcon", .r = 255, .g = 80, .b = 80 },
+    .{ .label = "AGENT", .id = "secretagent", .r = 220, .g = 180, .b = 255 },
+    .{ .label = "LUSH", .id = "lush", .r = 255, .g = 160, .b = 200 },
+    .{ .label = "DEEP", .id = "deepspaceone", .r = 140, .g = 240, .b = 240 },
+    .{ .label = "VIZ", .id = "viz", .r = 255, .g = 220, .b = 100 },
+    .{ .label = "STOP", .id = "stop", .r = 255, .g = 60, .b = 60 },
+};
+
+const max_screens = 16;
+const name_len = 64;
+const track_len = 128;
+
+const Daemon = struct {
+    dev: *hid.Device,
+    mx: matrix.Client,
+    sm: soma.Client,
+
+    page: Page = .matrix,
+
+    // matrix state
+    current_buf: [name_len]u8 = undefined,
+    current_len: usize = 0,
+    enabled_buf: [max_screens][name_len]u8 = undefined,
+    enabled_lens: [max_screens]usize = .{0} ** max_screens,
+    enabled_count: usize = 0,
+    auto_advance: bool = false,
+    mx_online: bool = false,
+
+    // soma state
+    sm_online: bool = false,
+    sm_playing: bool = false,
+    sm_volume: u8 = 0,
+    sm_channel_buf: [name_len]u8 = undefined,
+    sm_channel_len: usize = 0,
+    sm_id_buf: [name_len]u8 = undefined,
+    sm_id_len: usize = 0,
+    sm_track_buf: [track_len]u8 = undefined,
+    sm_track_len: usize = 0,
+
+    // what's currently on the deck (redraw when the signature changes)
+    keys_sig: u64 = 0,
+    strip_sig: u64 = 0,
+
+    brightness: u8 = 80,
+    prev_keys: [deck.key_count]bool = .{false} ** deck.key_count,
+    prev_dials: [deck.dial_count]bool = .{false} ** deck.dial_count,
+
+    fn currentScreen(self: *const Daemon) []const u8 {
+        return self.current_buf[0..self.current_len];
+    }
+
+    fn somaChannel(self: *const Daemon) []const u8 {
+        return self.sm_channel_buf[0..self.sm_channel_len];
+    }
+
+    fn somaId(self: *const Daemon) []const u8 {
+        return self.sm_id_buf[0..self.sm_id_len];
+    }
+
+    fn somaTrack(self: *const Daemon) []const u8 {
+        return self.sm_track_buf[0..self.sm_track_len];
+    }
+
+    fn copyInto(buf: []u8, len: *usize, s: []const u8) void {
+        const n = @min(s.len, buf.len);
+        @memcpy(buf[0..n], s[0..n]);
+        len.* = n;
+    }
+
+    // ----------------------------------------------------------
+    // State polling
+    // ----------------------------------------------------------
+    fn pollMatrix(self: *Daemon, arena: std.mem.Allocator) void {
+        const cfg = self.mx.getConfig(arena) catch {
+            self.mx_online = false;
+            return;
+        };
+        self.mx_online = true;
+        copyInto(&self.current_buf, &self.current_len, cfg.current);
+        self.auto_advance = cfg.auto_advance;
+        const names = cfg.enabledNames(arena) catch &.{};
+        self.enabled_count = @min(names.len, max_screens);
+        for (names[0..self.enabled_count], 0..) |name, i| {
+            copyInto(&self.enabled_buf[i], &self.enabled_lens[i], name);
+        }
+    }
+
+    fn pollSoma(self: *Daemon, arena: std.mem.Allocator) void {
+        const st = self.sm.status(arena) catch {
+            self.sm_online = false;
+            self.sm_playing = false;
+            return;
+        };
+        self.sm_online = true;
+        self.sm_playing = st.playing or st.connecting;
+        self.sm_volume = st.volume;
+        copyInto(&self.sm_channel_buf, &self.sm_channel_len, st.channel);
+        copyInto(&self.sm_id_buf, &self.sm_id_len, st.channel_id);
+        copyInto(&self.sm_track_buf, &self.sm_track_len, st.track);
+    }
+
+    fn somaCmd(self: *Daemon, arena: std.mem.Allocator, cmd: []const u8) void {
+        _ = self.sm.command(arena, cmd) catch {
+            self.sm_online = false;
+            self.sm_playing = false;
+            return;
+        };
+        // The command is applied on soma's next frame (~40ms); give it a
+        // moment, then refresh so the strip reflects the change at once.
+        std.Io.sleep(self.sm.io, .fromMilliseconds(60), .awake) catch {};
+        self.pollSoma(arena);
+    }
+
+    // ----------------------------------------------------------
+    // Drawing
+    // ----------------------------------------------------------
+    fn activeKeyName(self: *const Daemon) []const u8 {
+        return switch (self.page) {
+            .matrix => if (self.mx_online) self.currentScreen() else "",
+            .soma => if (self.sm_online and self.sm_playing) self.somaId() else "",
+        };
+    }
+
+    fn drawKeys(self: *Daemon, arena: std.mem.Allocator) !void {
+        switch (self.page) {
+            .matrix => for (matrix_keys, 0..) |ka, i| {
+                try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.screen, self.activeKeyName()));
+            },
+            .soma => for (soma_keys, 0..) |ka, i| {
+                try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.id, self.activeKeyName()));
+            },
+        }
+    }
+
+    fn drawKey(self: *Daemon, arena: std.mem.Allocator, key: u8, label: []const u8, r: u8, g: u8, b: u8, active: bool) !void {
+        var img = try image.Image.init(arena, deck.key_px, deck.key_px);
+        img.fill(r / 6, g / 6, b / 6);
+        render.drawTextCentered(&img, label, (deck.key_px - 16) / 2, 2, r, g, b);
+        if (active) render.border(&img, 4, 255, 255, 255);
+        var jpeg: std.ArrayList(u8) = .empty;
+        try image.encodeJpeg(&img, 90, &jpeg, arena);
+        try deck.setKeyImage(self.dev, key, jpeg.items);
+    }
+
+    fn drawStrip(self: *Daemon, arena: std.mem.Allocator) !void {
+        var img = try image.Image.init(arena, deck.strip_w, deck.strip_h);
+        img.fill(8, 8, 12);
+        switch (self.page) {
+            .matrix => {
+                if (!self.mx_online) {
+                    render.drawTextCentered(&img, "MATRIX OFFLINE", 38, 3, 255, 60, 60);
+                } else {
+                    render.drawTextCentered(&img, self.currentScreen(), 10, 3, 255, 120, 200);
+                    render.drawTextCentered(&img, if (self.auto_advance) "AUTO ON" else "AUTO OFF", 46, 2, 120, 120, 140);
+                    if (self.sm_playing) {
+                        var line: [name_len + track_len + 4]u8 = undefined;
+                        const s = std.fmt.bufPrint(&line, "{s} - {s}", .{ self.somaChannel(), self.somaTrack() }) catch "";
+                        render.drawTextCentered(&img, s[0..@min(s.len, 48)], 74, 2, 90, 200, 200);
+                    }
+                }
+            },
+            .soma => {
+                if (!self.sm_online) {
+                    render.drawTextCentered(&img, "SOMA OFFLINE", 38, 3, 255, 60, 60);
+                } else {
+                    render.drawTextCentered(&img, if (self.sm_playing) self.somaChannel() else "SOMA (stopped)", 10, 3, 120, 240, 140);
+                    render.drawTextCentered(&img, self.somaTrack()[0..@min(self.somaTrack().len, 48)], 46, 2, 140, 140, 160);
+                    var vol_buf: [16]u8 = undefined;
+                    const vol = std.fmt.bufPrint(&vol_buf, "VOL {d}%", .{self.sm_volume}) catch "";
+                    render.drawTextCentered(&img, vol, 74, 2, 200, 200, 120);
+                }
+            },
+        }
+        var jpeg: std.ArrayList(u8) = .empty;
+        try image.encodeJpeg(&img, 90, &jpeg, arena);
+        try deck.setStripImage(self.dev, 0, 0, deck.strip_w, deck.strip_h, jpeg.items);
+    }
+
+    fn keysSignature(self: *const Daemon) u64 {
+        var h = std.hash.Wyhash.init(1);
+        h.update(@tagName(self.page));
+        h.update(self.activeKeyName());
+        return h.final();
+    }
+
+    fn stripSignature(self: *const Daemon) u64 {
+        var h = std.hash.Wyhash.init(2);
+        h.update(@tagName(self.page));
+        h.update(if (self.mx_online) "y" else "n");
+        h.update(self.currentScreen());
+        h.update(if (self.auto_advance) "y" else "n");
+        h.update(if (self.sm_online) "y" else "n");
+        h.update(if (self.sm_playing) "y" else "n");
+        h.update(self.somaChannel());
+        h.update(self.somaTrack());
+        h.update(&.{self.sm_volume});
+        return h.final();
+    }
+
+    fn syncDisplay(self: *Daemon, arena: std.mem.Allocator) !void {
+        const ks = self.keysSignature();
+        const ss = self.stripSignature();
+        if (ks != self.keys_sig) {
+            try self.drawKeys(arena);
+            self.keys_sig = ks;
+        }
+        if (ss != self.strip_sig) {
+            try self.drawStrip(arena);
+            self.strip_sig = ss;
+        }
+    }
+
+    // ----------------------------------------------------------
+    // Actions
+    // ----------------------------------------------------------
+    fn jogMatrix(self: *Daemon, arena: std.mem.Allocator, dir: i8) void {
+        if (!self.mx_online or self.enabled_count == 0) return;
+        var pos: usize = 0;
+        var i: usize = 0;
+        while (i < self.enabled_count) : (i += 1) {
+            if (std.mem.eql(u8, self.enabled_buf[i][0..self.enabled_lens[i]], self.currentScreen())) pos = i;
+        }
+        const n = self.enabled_count;
+        const next = if (dir >= 0) (pos + 1) % n else (pos + n - 1) % n;
+        const name = self.enabled_buf[next][0..self.enabled_lens[next]];
+        self.mx.showScreen(arena, name) catch {
+            self.mx_online = false;
+            return;
+        };
+        copyInto(&self.current_buf, &self.current_len, name);
+    }
+
+    fn onKeys(self: *Daemon, arena: std.mem.Allocator, states: [deck.key_count]bool) void {
+        for (states, 0..) |pressed, i| {
+            if (!pressed or self.prev_keys[i]) continue;
+            switch (self.page) {
+                .matrix => {
+                    const ka = matrix_keys[i];
+                    std.debug.print("key {d} → matrix {s}\n", .{ i, ka.screen });
+                    self.mx.showScreen(arena, ka.screen) catch {
+                        self.mx_online = false;
+                        continue;
+                    };
+                    copyInto(&self.current_buf, &self.current_len, ka.screen);
+                },
+                .soma => {
+                    const ka = soma_keys[i];
+                    std.debug.print("key {d} → soma {s}\n", .{ i, ka.id });
+                    if (std.mem.eql(u8, ka.id, "viz")) {
+                        self.somaCmd(arena, "viz next");
+                    } else if (std.mem.eql(u8, ka.id, "stop")) {
+                        self.somaCmd(arena, "stop");
+                    } else {
+                        var cmd: [80]u8 = undefined;
+                        const c = std.fmt.bufPrint(&cmd, "play {s}", .{ka.id}) catch continue;
+                        self.somaCmd(arena, c);
+                    }
+                },
+            }
+        }
+        self.prev_keys = states;
+    }
+
+    fn onDialDeltas(self: *Daemon, arena: std.mem.Allocator, deltas: [deck.dial_count]i8) void {
+        for (deltas, 0..) |delta, i| {
+            if (delta == 0) continue;
+            switch (i) {
+                0 => self.somaCmd(arena, if (delta > 0) "vol +5" else "vol -5"),
+                1 => self.somaCmd(arena, if (delta > 0) "surf-next" else "surf-prev"),
+                2 => self.jogMatrix(arena, if (delta > 0) 1 else -1),
+                3 => {
+                    const step: i16 = @as(i16, delta) * 5;
+                    const next = std.math.clamp(@as(i16, self.brightness) + step, 0, 100);
+                    self.brightness = @intCast(next);
+                    deck.setBrightness(self.dev, self.brightness) catch {};
+                },
+                else => unreachable,
+            }
+        }
+    }
+
+    fn onDialPresses(self: *Daemon, arena: std.mem.Allocator, presses: [deck.dial_count]bool) void {
+        for (presses, 0..) |pressed, i| {
+            if (!pressed or self.prev_dials[i]) continue;
+            switch (i) {
+                0 => self.somaCmd(arena, "mute"),
+                1 => self.somaCmd(arena, "toggle"),
+                2 => {
+                    if (!self.mx_online) break;
+                    self.mx.setAutoAdvance(arena, !self.auto_advance) catch {
+                        self.mx_online = false;
+                        break;
+                    };
+                    self.auto_advance = !self.auto_advance;
+                },
+                3 => {
+                    self.page = if (self.page == .matrix) .soma else .matrix;
+                    std.debug.print("page → {s}\n", .{@tagName(self.page)});
+                },
+                else => unreachable,
+            }
+        }
+        self.prev_dials = presses;
+    }
+};
+
+pub fn run(io: std.Io, dev: *hid.Device, base_url: []const u8) !void {
+    // The HTTP client keeps a connection pool — its allocator must NOT be
+    // the cycle arena (that memory is freed every iteration).
+    var http = std.http.Client{ .allocator = std.heap.page_allocator, .io = io };
+    defer http.deinit();
+
+    var d: Daemon = .{
+        .dev = dev,
+        .mx = .{ .http = &http, .base = base_url },
+        .sm = soma.Client.init(io),
+    };
+    try deck.setBrightness(dev, d.brightness);
+
+    var cycle = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer cycle.deinit();
+    const arena = cycle.allocator();
+
+    d.pollMatrix(arena);
+    d.pollSoma(arena);
+    try d.syncDisplay(arena);
+    std.debug.print("daemon running (matrix: {s} current: {s} | soma: {s} playing: {})\n", .{
+        base_url, d.currentScreen(), if (d.sm_online) "online" else "offline", d.sm_playing,
+    });
+
+    var buf: [256]u8 = undefined;
+    var last_poll = std.Io.Clock.awake.now(io).toMilliseconds();
+    while (true) {
+        defer _ = cycle.reset(.retain_capacity);
+        if (try dev.pollReport(&buf, 250)) |len| {
+            if (deck.parseReport(buf[0..len])) |report| {
+                switch (report) {
+                    .keys => |states| d.onKeys(arena, states),
+                    .dial_deltas => |deltas| d.onDialDeltas(arena, deltas),
+                    .dial_presses => |presses| d.onDialPresses(arena, presses),
+                    .touch_swipe => |s| {
+                        const dx = @as(i32, s.to.x) - @as(i32, s.from.x);
+                        if (@abs(dx) > 60) d.jogMatrix(arena, if (dx > 0) 1 else -1);
+                    },
+                    else => {},
+                }
+                d.syncDisplay(arena) catch {};
+            }
+        }
+        const now = std.Io.Clock.awake.now(io).toMilliseconds();
+        if (now - last_poll > 2000) {
+            last_poll = now;
+            d.pollMatrix(arena);
+            d.pollSoma(arena);
+            d.syncDisplay(arena) catch {};
+        }
+    }
+}

@@ -2,6 +2,7 @@ const std = @import("std");
 const hid = @import("hid.zig");
 const deck = @import("deck.zig");
 const image = @import("image.zig");
+const daemon = @import("daemon.zig");
 
 fn usage() noreturn {
     std.debug.print(
@@ -13,6 +14,7 @@ fn usage() noreturn {
         \\  deckd brightness <0-100>    set panel brightness
         \\  deckd reset                 reset the device
         \\  deckd test-image            orientation test pattern on all keys + strip
+        \\  deckd run [matrix-url]      daemon: keys/knobs drive the matrix (default http://localhost:8787)
         \\
     , .{});
     std.process.exit(2);
@@ -105,6 +107,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try image.encodeJpeg(&strip, 90, &jpeg, alloc);
         try deck.setStripImage(&dev, 0, 0, deck.strip_w, deck.strip_h, jpeg.items);
         std.debug.print("strip: {d} bytes jpeg\n", .{jpeg.items.len});
+    } else if (std.mem.eql(u8, cmd, "run")) {
+        var dev = try openDeck(device_arg);
+        defer dev.close();
+        const base = positional orelse "http://localhost:8787";
+        // Single-threaded Io like soma-zig: all I/O blocks the caller.
+        var io_threaded: std.Io.Threaded = .init_single_threaded;
+        try daemon.run(io_threaded.io(), &dev, base);
     } else if (std.mem.eql(u8, cmd, "dump")) {
         var dev = try openDeck(device_arg);
         defer dev.close();
