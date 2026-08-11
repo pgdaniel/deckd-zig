@@ -11,11 +11,12 @@ pub const Config = struct {
     auto_advance: bool,
     current: []const u8,
 
-    /// Names of enabled screens, in panel order. Owned by caller's arena.
-    pub fn enabledNames(self: *const Config, arena: std.mem.Allocator) ![][]const u8 {
+    /// Names of ALL screens, in panel order. Owned by caller's arena. This
+    /// is the jog list: the deck can reach any screen directly, since
+    /// "enabled" only governs the auto-advance rotation.
+    pub fn allNames(self: *const Config, arena: std.mem.Allocator) ![][]const u8 {
         var names: std.ArrayList([]const u8) = .empty;
-        for (self.screens) |s| if (s.enabled) try names.append(arena, s.name);
-        if (names.items.len == 0) for (self.screens) |s| try names.append(arena, s.name);
+        for (self.screens) |s| try names.append(arena, s.name);
         return names.items;
     }
 };

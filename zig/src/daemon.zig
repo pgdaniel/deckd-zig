@@ -46,9 +46,11 @@ const Daemon = struct {
     // matrix state
     current_buf: [name_len]u8 = undefined,
     current_len: usize = 0,
-    enabled_buf: [max_screens][name_len]u8 = undefined,
-    enabled_lens: [max_screens]usize = .{0} ** max_screens,
-    enabled_count: usize = 0,
+    // Jog list: all screens in panel order (the deck can reach disabled
+    // screens too — "enabled" only governs the auto-advance rotation).
+    screen_buf: [max_screens][name_len]u8 = undefined,
+    screen_lens: [max_screens]usize = .{0} ** max_screens,
+    screen_count: usize = 0,
     auto_advance: bool = false,
     mx_online: bool = false,
 
@@ -104,10 +106,10 @@ const Daemon = struct {
         self.mx_online = true;
         copyInto(&self.current_buf, &self.current_len, cfg.current);
         self.auto_advance = cfg.auto_advance;
-        const names = cfg.enabledNames(arena) catch &.{};
-        self.enabled_count = @min(names.len, max_screens);
-        for (names[0..self.enabled_count], 0..) |name, i| {
-            copyInto(&self.enabled_buf[i], &self.enabled_lens[i], name);
+        const names = cfg.allNames(arena) catch &.{};
+        self.screen_count = @min(names.len, max_screens);
+        for (names[0..self.screen_count], 0..) |name, i| {
+            copyInto(&self.screen_buf[i], &self.screen_lens[i], name);
         }
     }
 
@@ -260,15 +262,15 @@ const Daemon = struct {
     // Actions
     // ----------------------------------------------------------
     fn jogMatrix(self: *Daemon, arena: std.mem.Allocator, dir: i8) void {
-        if (!self.mx_online or self.enabled_count == 0) return;
+        if (!self.mx_online or self.screen_count == 0) return;
         var pos: usize = 0;
         var i: usize = 0;
-        while (i < self.enabled_count) : (i += 1) {
-            if (std.mem.eql(u8, self.enabled_buf[i][0..self.enabled_lens[i]], self.currentScreen())) pos = i;
+        while (i < self.screen_count) : (i += 1) {
+            if (std.mem.eql(u8, self.screen_buf[i][0..self.screen_lens[i]], self.currentScreen())) pos = i;
         }
-        const n = self.enabled_count;
+        const n = self.screen_count;
         const next = if (dir >= 0) (pos + 1) % n else (pos + n - 1) % n;
-        const name = self.enabled_buf[next][0..self.enabled_lens[next]];
+        const name = self.screen_buf[next][0..self.screen_lens[next]];
         self.mx.showScreen(arena, name) catch {
             self.mx_online = false;
             return;
