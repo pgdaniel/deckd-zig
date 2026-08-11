@@ -32,6 +32,12 @@ pub const SomaKey = struct {
 pub const Config = struct {
     matrix_url: []const u8 = "http://localhost:8787",
     brightness: u8 = 80,
+    /// .ttf to render key/strip text with (e.g. any Nerd Font — PUA icon
+    /// codepoints in labels work, labels are UTF-8). null → built-in 8x8
+    /// bitmap font.
+    font_path: ?[]const u8 = null,
+    font_size_key: u16 = 22, // px em height on the 120x120 keys
+    font_size_strip: u16 = 30, // px em height for the strip's main line
     matrix_keys: [8]KeyAction = default_matrix_keys,
     soma_keys: [8]SomaKey = default_soma_keys,
 };
@@ -68,6 +74,9 @@ const JsonKey = struct {
 const JsonConfig = struct {
     matrix_url: ?[]const u8 = null,
     brightness: ?u8 = null,
+    font_path: ?[]const u8 = null,
+    font_size_key: ?u16 = null,
+    font_size_strip: ?u16 = null,
     matrix_keys: []?JsonKey = &.{},
     soma_keys: []?JsonKey = &.{},
 };
@@ -105,6 +114,9 @@ pub fn load(arena: std.mem.Allocator) Config {
 
     if (jc.matrix_url) |u| cfg.matrix_url = u;
     if (jc.brightness) |b| cfg.brightness = @min(b, 100);
+    if (jc.font_path) |p| cfg.font_path = p;
+    if (jc.font_size_key) |s| cfg.font_size_key = s;
+    if (jc.font_size_strip) |s| cfg.font_size_strip = s;
 
     for (jc.matrix_keys, 0..) |maybe, i| {
         if (i >= 8) break;

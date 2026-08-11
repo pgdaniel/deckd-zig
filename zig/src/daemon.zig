@@ -25,6 +25,7 @@ const matrix = @import("matrix.zig");
 const soma = @import("soma.zig");
 const ws = @import("ws.zig");
 const config = @import("config.zig");
+const ttf = @import("ttf.zig");
 
 const Page = enum { matrix, soma, mirror };
 
@@ -38,6 +39,7 @@ const Daemon = struct {
     sm: soma.Client,
     feed: *ws.FrameFeed,
     cfg: *const config.Config,
+    font: ?ttf.Font = null,
 
     page: Page = .matrix,
     mirror_drawn_counter: u64 = 0,
@@ -163,11 +165,22 @@ const Daemon = struct {
     fn drawKey(self: *Daemon, arena: std.mem.Allocator, key: u8, label: []const u8, r: u8, g: u8, b: u8, active: bool) !void {
         var img = try image.Image.init(arena, deck.key_px, deck.key_px);
         img.fill(r / 6, g / 6, b / 6);
-        render.drawTextCentered(&img, label, (deck.key_px - 16) / 2, 2, r, g, b);
+        self.drawCenteredText(&img, label, deck.key_px / 2, self.cfg.font_size_key, r, g, b);
         if (active) render.border(&img, 4, 255, 255, 255);
         var jpeg: std.ArrayList(u8) = .empty;
         try image.encodeJpeg(&img, 90, &jpeg, arena);
         try deck.setKeyImage(self.dev, key, jpeg.items);
+    }
+
+    /// Text centered at (img.w/2, cy): TTF when configured, else the 8x8
+    /// bitmap font at a scale matched to the requested px size.
+    fn drawCenteredText(self: *Daemon, img: *image.Image, text: []const u8, cy: usize, px: u16, r: u8, g: u8, b: u8) void {
+        if (self.font) |*f| {
+            f.drawCentered(img, text, img.w / 2, cy, px, r, g, b);
+        } else {
+            const scale: usize = if (px >= 28) 3 else if (px >= 12) 2 else 1;
+            render.drawTextCentered(img, text, cy -| 4 * scale, scale, r, g, b);
+        }
     }
 
     fn drawStrip(self: *Daemon, arena: std.mem.Allocator) !void {
@@ -176,26 +189,26 @@ const Daemon = struct {
         switch (self.page) {
             .matrix => {
                 if (!self.mx_online) {
-                    render.drawTextCentered(&img, "MATRIX OFFLINE", 38, 3, 255, 60, 60);
+                    self.drawCenteredText(&img, "MATRIX OFFLINE", 50, self.cfg.font_size_strip, 255, 60, 60);
                 } else {
-                    render.drawTextCentered(&img, self.currentScreen(), 10, 3, 255, 120, 200);
-                    render.drawTextCentered(&img, if (self.auto_advance) "AUTO ON" else "AUTO OFF", 46, 2, 120, 120, 140);
+                    self.drawCenteredText(&img, self.currentScreen(), 28, self.cfg.font_size_strip, 255, 120, 200);
+                    self.drawCenteredText(&img, if (self.auto_advance) "AUTO ON" else "AUTO OFF", 60, 16, 120, 120, 140);
                     if (self.sm_playing) {
                         var line: [name_len + track_len + 4]u8 = undefined;
                         const s = std.fmt.bufPrint(&line, "{s} - {s}", .{ self.somaChannel(), self.somaTrack() }) catch "";
-                        render.drawTextCentered(&img, s[0..@min(s.len, 48)], 74, 2, 90, 200, 200);
+                        self.drawCenteredText(&img, s[0..@min(s.len, 48)], 84, 16, 90, 200, 200);
                     }
                 }
             },
             .soma => {
                 if (!self.sm_online) {
-                    render.drawTextCentered(&img, "SOMA OFFLINE", 38, 3, 255, 60, 60);
+                    self.drawCenteredText(&img, "SOMA OFFLINE", 50, self.cfg.font_size_strip, 255, 60, 60);
                 } else {
-                    render.drawTextCentered(&img, if (self.sm_playing) self.somaChannel() else "SOMA (stopped)", 10, 3, 120, 240, 140);
-                    render.drawTextCentered(&img, self.somaTrack()[0..@min(self.somaTrack().len, 48)], 46, 2, 140, 140, 160);
+                    self.drawCenteredText(&img, if (self.sm_playing) self.somaChannel() else "SOMA (stopped)", 28, self.cfg.font_size_strip, 120, 240, 140);
+                    self.drawCenteredText(&img, self.somaTrack()[0..@min(self.somaTrack().len, 48)], 60, 16, 140, 140, 160);
                     var vol_buf: [16]u8 = undefined;
                     const vol = std.fmt.bufPrint(&vol_buf, "VOL {d}%", .{self.sm_volume}) catch "";
-                    render.drawTextCentered(&img, vol, 74, 2, 200, 200, 120);
+                    self.drawCenteredText(&img, vol, 84, 16, 200, 200, 120);
                 }
             },
             .mirror => {
@@ -377,6 +390,13 @@ pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
         .cfg = cfg,
         .brightness = cfg.brightness,
     };
+    if (cfg.font_path) |path| {
+        d.font = ttf.Font.load(std.heap.page_allocator, path) catch |err| blk: {
+            std.debug.print("font: {s} failed ({s}), using built-in 8x8\n", .{ path, @errorName(err) });
+            break :blk null;
+        };
+        if (d.font != null) std.debug.print("font: using {s}\n", .{path});
+    }
     try deck.setBrightness(dev, d.brightness);
 
     var cycle = std.heap.ArenaAllocator.init(std.heap.page_allocator);

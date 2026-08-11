@@ -50,6 +50,9 @@ defaults in `zig/src/config.zig`:
 {
   "matrix_url": "http://192.168.1.160:8787",
   "brightness": 80,
+  "font_path": "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Bold.ttf",
+  "font_size_key": 22,
+  "font_size_strip": 30,
   "matrix_keys": [ { "label": "WEATHER", "screen": "weather-cyberpunk", "color": "ff8c00" } ],
   "soma_keys":   [ { "label": "GROOVE",  "id": "groovesalad",        "color": "78dc78" } ]
 }
@@ -58,6 +61,16 @@ defaults in `zig/src/config.zig`:
 Key lists patch the default 8-key maps **by index**; an entry may set just the
 fields it changes. Soma keys take any SomaFM channel id plus the special ids
 `viz` and `stop`. Knob roles are not configurable yet.
+
+### Fonts
+
+`font_path` can point at **any .ttf** — text is rasterized with stb_truetype.
+Nerd Fonts (https://www.nerdfonts.com/font-downloads) work including their
+Private-Use-Area icon glyphs, so labels can be icons, e.g.
+`"label": "\uf001"` (labels are UTF-8 JSON strings). Sizes are em-px for the
+120×120 keys and the strip's main line; sub-lines render at 16 px. Omit
+`font_path` (or point it at a missing file) to fall back to the built-in 8×8
+bitmap font. See what's installed with `fc-list | grep -i nerd`.
 
 ## Testing under pm2
 

@@ -25,6 +25,10 @@ pub fn build(b: *std.Build) void {
         .file = b.path("vendor/stb_image_write_impl.c"),
         .flags = &.{ "-O2", "-w", "-fno-sanitize=all" },
     });
+    mod.addCSourceFile(.{
+        .file = b.path("vendor/stb_truetype_impl.c"),
+        .flags = &.{ "-O2", "-w", "-fno-sanitize=all" },
+    });
 
     const exe = b.addExecutable(.{
         .name = "deckd",
