@@ -59,7 +59,19 @@ Key lists patch the default 8-key maps **by index**; an entry may set just the
 fields it changes. Soma keys take any SomaFM channel id plus the special ids
 `viz` and `stop`. Knob roles are not configurable yet.
 
-## Run at login
+## Testing under pm2
+
+```
+cd zig && zig build && cd ..
+pm2 start ecosystem.config.js       # or: pm2 restart deckd
+pm2 logs deckd
+```
+
+Rebuild-then-restart is the iteration loop (watch mode is off on purpose:
+`zig build` replaces the binary wholesale). pm2 stops being involved at
+production time — see below.
+
+## Run at login (production)
 
 ```
 cp systemd/deckd.service ~/.config/systemd/user/
@@ -70,6 +82,10 @@ journalctl --user -u deckd -f     # watch it
 
 Runs unprivileged (the hidraw ACL comes from logind). To also start it at
 boot before login: `sudo loginctl enable-linger $USER`.
+
+**Never run pm2 and the systemd service at the same time** — two deckd
+processes share the hidraw node and fight over the deck
+(`pm2 stop deckd` before `systemctl --user start deckd`, and vice versa).
 
 ## Controls
 
