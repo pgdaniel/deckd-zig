@@ -3,6 +3,7 @@ const hid = @import("hid.zig");
 const deck = @import("deck.zig");
 const image = @import("image.zig");
 const daemon = @import("daemon.zig");
+const config = @import("config.zig");
 
 fn usage() noreturn {
     std.debug.print(
@@ -110,10 +111,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     } else if (std.mem.eql(u8, cmd, "run")) {
         var dev = try openDeck(device_arg);
         defer dev.close();
-        const base = positional orelse "http://localhost:8787";
+        // Config lives for the whole process (parsed strings point into it).
+        var cfg_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        const cfg = try cfg_arena.allocator().create(config.Config);
+        cfg.* = config.load(cfg_arena.allocator());
+        if (positional) |url| cfg.matrix_url = url; // CLI beats config file
         // Single-threaded Io like soma-zig: all I/O blocks the caller.
         var io_threaded: std.Io.Threaded = .init_single_threaded;
-        try daemon.run(io_threaded.io(), &dev, base);
+        try daemon.run(io_threaded.io(), &dev, cfg);
     } else if (std.mem.eql(u8, cmd, "dump")) {
         var dev = try openDeck(device_arg);
         defer dev.close();

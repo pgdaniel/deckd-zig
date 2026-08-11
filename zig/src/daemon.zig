@@ -24,46 +24,9 @@ const render = @import("render.zig");
 const matrix = @import("matrix.zig");
 const soma = @import("soma.zig");
 const ws = @import("ws.zig");
+const config = @import("config.zig");
 
 const Page = enum { matrix, soma, mirror };
-
-const KeyAction = struct {
-    label: []const u8,
-    screen: []const u8,
-    r: u8,
-    g: u8,
-    b: u8,
-};
-
-const matrix_keys = [deck.key_count]KeyAction{
-    .{ .label = "WEATHER", .screen = "weather-cyberpunk", .r = 255, .g = 140, .b = 0 },
-    .{ .label = "HIGH", .screen = "high-temp-cyberpunk", .r = 255, .g = 220, .b = 0 },
-    .{ .label = "CLOCK", .screen = "clock-cyberpunk", .r = 0, .g = 220, .b = 255 },
-    .{ .label = "AQI", .screen = "aqi-cyberpunk", .r = 0, .g = 220, .b = 100 },
-    .{ .label = "HUMID", .screen = "humidity-cyberpunk", .r = 60, .g = 120, .b = 255 },
-    .{ .label = "SPECTR", .screen = "spectrum", .r = 255, .g = 0, .b = 220 },
-    .{ .label = "SCOPE", .screen = "oscope", .r = 255, .g = 60, .b = 120 },
-    .{ .label = "MSG", .screen = "message", .r = 220, .g = 220, .b = 220 },
-};
-
-const SomaKey = struct {
-    label: []const u8,
-    id: []const u8, // SomaFM channel id; "viz"/"stop" are special actions
-    r: u8,
-    g: u8,
-    b: u8,
-};
-
-const soma_keys = [deck.key_count]SomaKey{
-    .{ .label = "GROOVE", .id = "groovesalad", .r = 120, .g = 220, .b = 120 },
-    .{ .label = "DRONE", .id = "dronezone", .r = 100, .g = 160, .b = 255 },
-    .{ .label = "DEFCON", .id = "defcon", .r = 255, .g = 80, .b = 80 },
-    .{ .label = "AGENT", .id = "secretagent", .r = 220, .g = 180, .b = 255 },
-    .{ .label = "LUSH", .id = "lush", .r = 255, .g = 160, .b = 200 },
-    .{ .label = "DEEP", .id = "deepspaceone", .r = 140, .g = 240, .b = 240 },
-    .{ .label = "VIZ", .id = "viz", .r = 255, .g = 220, .b = 100 },
-    .{ .label = "STOP", .id = "stop", .r = 255, .g = 60, .b = 60 },
-};
 
 const max_screens = 16;
 const name_len = 64;
@@ -74,6 +37,7 @@ const Daemon = struct {
     mx: matrix.Client,
     sm: soma.Client,
     feed: *ws.FrameFeed,
+    cfg: *const config.Config,
 
     page: Page = .matrix,
     mirror_drawn_counter: u64 = 0,
@@ -185,10 +149,10 @@ const Daemon = struct {
 
     fn drawKeys(self: *Daemon, arena: std.mem.Allocator) !void {
         switch (self.page) {
-            .matrix, .mirror => for (matrix_keys, 0..) |ka, i| {
+            .matrix, .mirror => for (self.cfg.matrix_keys, 0..) |ka, i| {
                 try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.screen, self.activeKeyName()));
             },
-            .soma => for (soma_keys, 0..) |ka, i| {
+            .soma => for (self.cfg.soma_keys, 0..) |ka, i| {
                 try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.id, self.activeKeyName()));
             },
         }
@@ -317,7 +281,7 @@ const Daemon = struct {
             if (!pressed or self.prev_keys[i]) continue;
             switch (self.page) {
                 .matrix, .mirror => {
-                    const ka = matrix_keys[i];
+                    const ka = self.cfg.matrix_keys[i];
                     std.debug.print("key {d} → matrix {s}\n", .{ i, ka.screen });
                     self.mx.showScreen(arena, ka.screen) catch {
                         self.mx_online = false;
@@ -326,7 +290,7 @@ const Daemon = struct {
                     copyInto(&self.current_buf, &self.current_len, ka.screen);
                 },
                 .soma => {
-                    const ka = soma_keys[i];
+                    const ka = self.cfg.soma_keys[i];
                     std.debug.print("key {d} → soma {s}\n", .{ i, ka.id });
                     if (std.mem.eql(u8, ka.id, "viz")) {
                         self.somaCmd(arena, "viz next");
@@ -390,7 +354,8 @@ const Daemon = struct {
     }
 };
 
-pub fn run(io: std.Io, dev: *hid.Device, base_url: []const u8) !void {
+pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
+    const base_url = cfg.matrix_url;
     // The HTTP client keeps a connection pool — its allocator must NOT be
     // the cycle arena (that memory is freed every iteration).
     var http = std.http.Client{ .allocator = std.heap.page_allocator, .io = io };
@@ -407,6 +372,8 @@ pub fn run(io: std.Io, dev: *hid.Device, base_url: []const u8) !void {
         .mx = .{ .http = &http, .base = base_url },
         .sm = soma.Client.init(io),
         .feed = feed,
+        .cfg = cfg,
+        .brightness = cfg.brightness,
     };
     try deck.setBrightness(dev, d.brightness);
 

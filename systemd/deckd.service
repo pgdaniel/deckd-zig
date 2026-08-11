@@ -1,0 +1,14 @@
+[Unit]
+Description=deckd — Stream Deck Plus daemon (matrix + soma controller)
+Documentation=https://github.com/local/deckd-zig
+# The deck's hidraw node gets its user ACL from logind's uaccess tag, so
+# this runs fine as an unprivileged user service in the desktop session.
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/deckd-zig/zig/zig-out/bin/deckd run
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

@@ -27,8 +27,8 @@ Vendored: `stb_image_write.h` for JPEG encoding (keys/strip only accept JPEG).
 ## Running
 
 ```
-deckd run                          # matrix at http://localhost:8787
-deckd run http://192.168.1.160:8787   # the real panel on the Pi
+deckd run                          # uses ~/.config/deckd/config.json
+deckd run http://192.168.1.160:8787   # CLI URL beats the config file
 ```
 
 The device is auto-discovered by scanning `/sys/class/hidraw/*/device/uevent`
@@ -41,9 +41,40 @@ deck shows actually changes (signature-driven), so it's quiet when idle. The
 matrix being unreachable shows `MATRIX OFFLINE` on the strip instead of
 killing the daemon; same for `SOMA OFFLINE`.
 
+## Configuration
+
+`~/.config/deckd/config.json` — everything is optional and falls back to the
+defaults in `zig/src/config.zig`:
+
+```json
+{
+  "matrix_url": "http://192.168.1.160:8787",
+  "brightness": 80,
+  "matrix_keys": [ { "label": "WEATHER", "screen": "weather-cyberpunk", "color": "ff8c00" } ],
+  "soma_keys":   [ { "label": "GROOVE",  "id": "groovesalad",        "color": "78dc78" } ]
+}
+```
+
+Key lists patch the default 8-key maps **by index**; an entry may set just the
+fields it changes. Soma keys take any SomaFM channel id plus the special ids
+`viz` and `stop`. Knob roles are not configurable yet.
+
+## Run at login
+
+```
+cp systemd/deckd.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now deckd
+journalctl --user -u deckd -f     # watch it
+```
+
+Runs unprivileged (the hidraw ACL comes from logind). To also start it at
+boot before login: `sudo loginctl enable-linger $USER`.
+
 ## Controls
 
-**Knob 4 push switches pages.** Knob roles are fixed on all pages:
+**Knob 4 push cycles pages: MATRIX → SOMA → MIRROR.** Knob roles are fixed
+on all pages:
 
 | Knob | Rotate | Push |
 |---|---|---|
@@ -77,8 +108,13 @@ the visualizer pattern) and STOP:
 
 Strip: channel name (or `SOMA (stopped)`), current track, `VOL n%`.
 
-Key maps are hardcoded in `zig/src/daemon.zig` (`matrix_keys`, `soma_keys`) —
-a config file is on the backlog.
+### MIRROR page
+
+The strip shows the **live matrix framebuffer** (64×32, integer-scaled and
+centered), streamed from matrix_server's WebSocket broadcast on port 8888 —
+the same feed `led-matrix-simulator.html` uses. Redraws are throttled to ~4
+fps. Keys behave like the MATRIX page, so you can switch screens while
+watching the mirror.
 
 ## Dev CLI
 
@@ -134,12 +170,13 @@ the image into noise lines). 800×100 JPEG, no rotation needed.
 | `zig/src/render.zig` | text/shape drawing (`font8x8.zig`, public-domain 8×8 font) |
 | `zig/src/matrix.zig` | matrix_sim HTTP control client |
 | `zig/src/soma.zig` | soma-zig IPC client |
-| `zig/src/daemon.zig` | pages, key maps, knob wiring, strip layouts, main loop |
+| `zig/src/ws.zig` | WebSocket client for the matrix framebuffer stream |
+| `zig/src/config.zig` | `~/.config/deckd/config.json` loading + default key maps |
+| `zig/src/daemon.zig` | pages, knob wiring, strip layouts, main loop |
 | `zig/src/main.zig` | CLI (`run` + dev commands) |
+| `systemd/deckd.service` | user service for running at login |
 
 ## Backlog
 
-- Config file for key maps / knob assignments (currently hardcoded)
-- systemd user service so deckd starts with the session
-- Live mirror of the matrix framebuffer on the strip (frames are on
-  `ws://:8888` from matrix_server)
+- Configurable knob roles (currently hardcoded)
+- Per-band auto-gain in soma-zig's visualizer (high bands read low)
