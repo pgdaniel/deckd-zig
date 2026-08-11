@@ -47,8 +47,19 @@ pub const Client = struct {
 
     /// Send one command line; returns the reply line (arena-owned).
     pub fn command(self: *const Client, arena: std.mem.Allocator, cmd: []const u8) ![]const u8 {
+        // Pre-check the socket file exists: connecting to a missing one
+        // surfaces ECONNREFUSED through std as a noisy "unexpected errno"
+        // trace on 0.16, and soma simply not running is the common case.
+        {
+            const p = self.path();
+            var path_z: [109]u8 = undefined;
+            @memcpy(path_z[0..p.len], p);
+            path_z[p.len] = 0;
+            const rc = std.os.linux.access(@ptrCast(path_z[0..p.len :0].ptr), 0); // F_OK
+            if (std.os.linux.errno(rc) != .SUCCESS) return error.Offline;
+        }
         const addr = try std.Io.net.UnixAddress.init(self.path());
-        const stream = try std.Io.net.UnixAddress.connect(&addr, self.io);
+        const stream = std.Io.net.UnixAddress.connect(&addr, self.io) catch return error.Offline;
         defer stream.close(self.io);
 
         var wbuf: [256]u8 = undefined;

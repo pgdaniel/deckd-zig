@@ -23,8 +23,9 @@ const image = @import("image.zig");
 const render = @import("render.zig");
 const matrix = @import("matrix.zig");
 const soma = @import("soma.zig");
+const ws = @import("ws.zig");
 
-const Page = enum { matrix, soma };
+const Page = enum { matrix, soma, mirror };
 
 const KeyAction = struct {
     label: []const u8,
@@ -72,8 +73,11 @@ const Daemon = struct {
     dev: *hid.Device,
     mx: matrix.Client,
     sm: soma.Client,
+    feed: *ws.FrameFeed,
 
     page: Page = .matrix,
+    mirror_drawn_counter: u64 = 0,
+    last_mirror_ms: i64 = 0,
 
     // matrix state
     current_buf: [name_len]u8 = undefined,
@@ -174,14 +178,14 @@ const Daemon = struct {
     // ----------------------------------------------------------
     fn activeKeyName(self: *const Daemon) []const u8 {
         return switch (self.page) {
-            .matrix => if (self.mx_online) self.currentScreen() else "",
+            .matrix, .mirror => if (self.mx_online) self.currentScreen() else "",
             .soma => if (self.sm_online and self.sm_playing) self.somaId() else "",
         };
     }
 
     fn drawKeys(self: *Daemon, arena: std.mem.Allocator) !void {
         switch (self.page) {
-            .matrix => for (matrix_keys, 0..) |ka, i| {
+            .matrix, .mirror => for (matrix_keys, 0..) |ka, i| {
                 try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.screen, self.activeKeyName()));
             },
             .soma => for (soma_keys, 0..) |ka, i| {
@@ -228,6 +232,25 @@ const Daemon = struct {
                     render.drawTextCentered(&img, vol, 74, 2, 200, 200, 120);
                 }
             },
+            .mirror => {
+                var fbuf: [ws.max_w * ws.max_h * 3]u8 = undefined;
+                var fw: usize = 0;
+                var fh: usize = 0;
+                if (self.feed.latest(&fbuf, &fw, &fh)) {
+                    // Largest integer scale that fits the strip, centered.
+                    const scale = @max(1, @min(deck.strip_w / fw, deck.strip_h / fh));
+                    const ox = (deck.strip_w - fw * scale) / 2;
+                    const oy = (deck.strip_h - fh * scale) / 2;
+                    for (0..fh) |y| {
+                        for (0..fw) |x| {
+                            const si = (y * fw + x) * 3;
+                            img.fillRect(ox + x * scale, oy + y * scale, scale, scale, fbuf[si], fbuf[si + 1], fbuf[si + 2]);
+                        }
+                    }
+                } else {
+                    render.drawTextCentered(&img, "NO SIGNAL", 38, 3, 255, 60, 60);
+                }
+            },
         }
         var jpeg: std.ArrayList(u8) = .empty;
         try image.encodeJpeg(&img, 90, &jpeg, arena);
@@ -236,7 +259,8 @@ const Daemon = struct {
 
     fn keysSignature(self: *const Daemon) u64 {
         var h = std.hash.Wyhash.init(1);
-        h.update(@tagName(self.page));
+        // Mirror page shows the same keys as the matrix page.
+        h.update(if (self.page == .soma) "soma" else "matrix");
         h.update(self.activeKeyName());
         return h.final();
     }
@@ -292,7 +316,7 @@ const Daemon = struct {
         for (states, 0..) |pressed, i| {
             if (!pressed or self.prev_keys[i]) continue;
             switch (self.page) {
-                .matrix => {
+                .matrix, .mirror => {
                     const ka = matrix_keys[i];
                     std.debug.print("key {d} → matrix {s}\n", .{ i, ka.screen });
                     self.mx.showScreen(arena, ka.screen) catch {
@@ -352,7 +376,11 @@ const Daemon = struct {
                     self.auto_advance = !self.auto_advance;
                 },
                 3 => {
-                    self.page = if (self.page == .matrix) .soma else .matrix;
+                    self.page = switch (self.page) {
+                        .matrix => .soma,
+                        .soma => .mirror,
+                        .mirror => .matrix,
+                    };
                     std.debug.print("page → {s}\n", .{@tagName(self.page)});
                 },
                 else => unreachable,
@@ -368,10 +396,17 @@ pub fn run(io: std.Io, dev: *hid.Device, base_url: []const u8) !void {
     var http = std.http.Client{ .allocator = std.heap.page_allocator, .io = io };
     defer http.deinit();
 
+    // Live matrix framebuffer feed (same host as the control API, port 8888).
+    const feed = try std.heap.page_allocator.create(ws.FrameFeed);
+    feed.* = ws.FrameFeed.init(io, base_url);
+    const feed_thread = try std.Thread.spawn(.{}, ws.FrameFeed.run, .{feed});
+    feed_thread.detach();
+
     var d: Daemon = .{
         .dev = dev,
         .mx = .{ .http = &http, .base = base_url },
         .sm = soma.Client.init(io),
+        .feed = feed,
     };
     try deck.setBrightness(dev, d.brightness);
 
@@ -406,6 +441,17 @@ pub fn run(io: std.Io, dev: *hid.Device, base_url: []const u8) !void {
             }
         }
         const now = std.Io.Clock.awake.now(io).toMilliseconds();
+        // Mirror page: follow the framebuffer stream, throttled to ~4 fps
+        // (the strip upload is a full JPEG each time; don't hammer USB).
+        if (d.page == .mirror and now - d.last_mirror_ms >= 250) {
+            const c = d.feed.frameCounter();
+            if (c != d.mirror_drawn_counter) {
+                d.mirror_drawn_counter = c;
+                d.last_mirror_ms = now;
+                d.drawStrip(arena) catch {};
+                d.strip_sig = d.stripSignature();
+            }
+        }
         if (now - last_poll > 2000) {
             last_poll = now;
             d.pollMatrix(arena);
