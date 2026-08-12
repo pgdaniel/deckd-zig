@@ -271,6 +271,16 @@ const Daemon = struct {
         }
     }
 
+    /// Like syncDisplay, but a dead device propagates so the event loop
+    /// can hand off to the reconnect logic instead of spinning on a
+    /// corpse fd.
+    fn syncDisplayChecked(self: *Daemon, arena: std.mem.Allocator) error{DeviceGone}!void {
+        self.syncDisplay(arena) catch |err| switch (err) {
+            error.DeviceGone => return error.DeviceGone,
+            else => {},
+        };
+    }
+
     // ----------------------------------------------------------
     // Actions
     // ----------------------------------------------------------
@@ -401,13 +411,31 @@ pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
 
     var cycle = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer cycle.deinit();
+
+    // Survive the cable being pulled: eventLoop exits with DeviceGone, we
+    // wait for the deck to reappear, then pick up where we left off.
+    while (true) {
+        eventLoop(io, dev, &d, &cycle) catch |err| switch (err) {
+            error.DeviceGone => {
+                reconnect(io, dev, &d) catch |e| switch (e) {
+                    error.DeviceGone => continue, // yanked again mid-reconnect
+                    else => return e,
+                };
+            },
+            else => return err,
+        };
+    }
+}
+
+fn eventLoop(io: std.Io, dev: *hid.Device, d: *Daemon, cycle: *std.heap.ArenaAllocator) !void {
     const arena = cycle.allocator();
 
+    _ = cycle.reset(.retain_capacity);
     d.pollMatrix(arena);
     d.pollSoma(arena);
     try d.syncDisplay(arena);
     std.debug.print("daemon running (matrix: {s} current: {s} | soma: {s} playing: {})\n", .{
-        base_url, d.currentScreen(), if (d.sm_online) "online" else "offline", d.sm_playing,
+        d.mx.base, d.currentScreen(), if (d.sm_online) "online" else "offline", d.sm_playing,
     });
 
     var buf: [256]u8 = undefined;
@@ -426,7 +454,7 @@ pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
                     },
                     else => {},
                 }
-                d.syncDisplay(arena) catch {};
+                try d.syncDisplayChecked(arena);
             }
         }
         const now = std.Io.Clock.awake.now(io).toMilliseconds();
@@ -437,7 +465,10 @@ pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
             if (c != d.mirror_drawn_counter) {
                 d.mirror_drawn_counter = c;
                 d.last_mirror_ms = now;
-                d.drawStrip(arena) catch {};
+                d.drawStrip(arena) catch |err| switch (err) {
+                    error.DeviceGone => return error.DeviceGone,
+                    else => {},
+                };
                 d.strip_sig = d.stripSignature();
             }
         }
@@ -445,7 +476,32 @@ pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
             last_poll = now;
             d.pollMatrix(arena);
             d.pollSoma(arena);
-            d.syncDisplay(arena) catch {};
+            try d.syncDisplayChecked(arena);
         }
     }
+}
+
+/// Cable was pulled: drop the corpse fd and wait for the deck to reappear
+/// (it comes back on a fresh hidraw node), then re-apply settings and
+/// force a full repaint.
+fn reconnect(io: std.Io, dev: *hid.Device, d: *Daemon) !void {
+    std.debug.print("deck unplugged — waiting for it to reappear\n", .{});
+    dev.close();
+    var path_buf: [64]u8 = undefined;
+    while (true) {
+        std.Io.sleep(io, .fromMilliseconds(500), .awake) catch {};
+        const found = hid.findDevicePath(&path_buf) catch continue;
+        const path = found orelse continue;
+        dev.* = hid.Device.open(path) catch continue;
+        std.debug.print("deck reconnected on {s}\n", .{path});
+        break;
+    }
+    // An unplug mid-upload can leave keys half-written on the panel, and
+    // input snapshots from the old session are stale: reset both so the
+    // next sync repaints everything and key diffs start clean.
+    d.keys_sig = 0;
+    d.strip_sig = 0;
+    d.prev_keys = .{false} ** deck.key_count;
+    d.prev_dials = .{false} ** deck.dial_count;
+    try deck.setBrightness(dev, d.brightness);
 }

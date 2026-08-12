@@ -35,6 +35,7 @@ pub const Device = struct {
         const rc = std.os.linux.ioctl(self.fd, hidioCGFeature(buf.len), @intFromPtr(buf.ptr));
         switch (std.os.linux.errno(rc)) {
             .SUCCESS => {},
+            .IO, .NODEV, .NXIO => return error.DeviceGone,
             else => return error.IoctlFailed,
         }
     }
@@ -47,6 +48,7 @@ pub const Device = struct {
         const rc = std.os.linux.ioctl(self.fd, hidioCSFeature(buf.len), @intFromPtr(&buf));
         switch (std.os.linux.errno(rc)) {
             .SUCCESS => {},
+            .IO, .NODEV, .NXIO => return error.DeviceGone,
             else => return error.IoctlFailed,
         }
     }
@@ -58,19 +60,28 @@ pub const Device = struct {
             switch (std.os.linux.errno(rc)) {
                 .SUCCESS => off += rc,
                 .AGAIN => continue,
+                .IO, .NODEV, .NXIO => return error.DeviceGone,
                 else => return error.WriteFailed,
             }
         }
     }
 
     /// Wait up to timeout_ms for an input report. Returns null on timeout.
+    /// error.DeviceGone means the cable was pulled: the kernel keeps the fd
+    /// open but signals POLLERR|POLLHUP (and reads fail with EIO), so
+    /// without this check poll would return instantly forever — a busy loop.
     pub fn pollReport(self: *Device, buf: []u8, timeout_ms: i32) !?usize {
         var fds = [_]std.posix.pollfd{
             .{ .fd = self.fd, .events = std.posix.POLL.IN, .revents = 0 },
         };
         const n = try std.posix.poll(&fds, timeout_ms);
         if (n == 0) return null;
-        const got = std.posix.read(self.fd, buf) catch return null;
+        if (fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL) != 0)
+            return error.DeviceGone;
+        const got = std.posix.read(self.fd, buf) catch |err| switch (err) {
+            error.WouldBlock => return null, // raced with poll; treat as timeout
+            else => return error.DeviceGone,
+        };
         return got;
     }
 };
