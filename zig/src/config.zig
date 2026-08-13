@@ -5,12 +5,17 @@
 //!   "matrix_url": "http://192.168.1.160:8787",
 //!   "brightness": 80,
 //!   "matrix_keys": [ {"label": "WEATHER", "screen": "weather-cyberpunk", "color": "ff8c00"}, ... ],
-//!   "soma_keys":   [ {"label": "GROOVE",  "id": "groovesalad",        "color": "78dc78"}, ... ]
+//!   "soma_keys":   [ {"label": "GROOVE",  "id": "groovesalad",        "color": "78dc78"}, ... ],
+//!   "mqtt_host": "192.168.1.10", "mqtt_port": 1883,
+//!   "mqtt_user": "...", "mqtt_pass": "...",
+//!   "mqtt_keys":   [ {"label": "LT ON",   "topic": "home/lights/set", "payload": "ON", "color": "ffc850"}, ... ]
 //! }
 //!
 //! Key lists patch the default maps by index (8 entries max); an entry may
 //! set just the fields it wants to change. Soma keys also accept the special
-//! ids "viz" and "stop".
+//! ids "viz" and "stop". MQTT keys publish payload to topic on press; an
+//! empty topic disables the key. mqtt_host must be a literal IP (or
+//! "localhost") — no DNS.
 const std = @import("std");
 
 pub const KeyAction = struct {
@@ -29,6 +34,15 @@ pub const SomaKey = struct {
     b: u8,
 };
 
+pub const MqttKey = struct {
+    label: []const u8,
+    topic: []const u8, // empty = key does nothing
+    payload: []const u8,
+    r: u8,
+    g: u8,
+    b: u8,
+};
+
 pub const Config = struct {
     matrix_url: []const u8 = "http://localhost:8787",
     brightness: u8 = 80,
@@ -40,6 +54,12 @@ pub const Config = struct {
     font_size_strip: u16 = 30, // px em height for the strip's main line
     matrix_keys: [8]KeyAction = default_matrix_keys,
     soma_keys: [8]SomaKey = default_soma_keys,
+    // MQTT page: empty host hides nothing but shows "MQTT NOT CONFIGURED".
+    mqtt_host: []const u8 = "",
+    mqtt_port: u16 = 1883,
+    mqtt_user: []const u8 = "",
+    mqtt_pass: []const u8 = "",
+    mqtt_keys: [8]MqttKey = default_mqtt_keys,
 };
 
 pub const default_matrix_keys = [8]KeyAction{
@@ -64,10 +84,24 @@ pub const default_soma_keys = [8]SomaKey{
     .{ .label = "STOP", .id = "stop", .r = 255, .g = 60, .b = 60 },
 };
 
+// Placeholders — point these at your own topics. Empty topic = inert key.
+pub const default_mqtt_keys = [8]MqttKey{
+    .{ .label = "LT ON", .topic = "home/lights/set", .payload = "ON", .r = 255, .g = 200, .b = 80 },
+    .{ .label = "LT OFF", .topic = "home/lights/set", .payload = "OFF", .r = 130, .g = 100, .b = 40 },
+    .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
+    .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
+    .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
+    .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
+    .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
+    .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
+};
+
 const JsonKey = struct {
     label: ?[]const u8 = null,
     screen: ?[]const u8 = null,
     id: ?[]const u8 = null,
+    topic: ?[]const u8 = null,
+    payload: ?[]const u8 = null,
     color: ?[]const u8 = null,
 };
 
@@ -79,6 +113,11 @@ const JsonConfig = struct {
     font_size_strip: ?u16 = null,
     matrix_keys: []?JsonKey = &.{},
     soma_keys: []?JsonKey = &.{},
+    mqtt_host: ?[]const u8 = null,
+    mqtt_port: ?u16 = null,
+    mqtt_user: ?[]const u8 = null,
+    mqtt_pass: ?[]const u8 = null,
+    mqtt_keys: []?JsonKey = &.{},
 };
 
 fn parseColor(hex: []const u8) ?[3]u8 {
@@ -117,6 +156,10 @@ pub fn load(arena: std.mem.Allocator) Config {
     if (jc.font_path) |p| cfg.font_path = p;
     if (jc.font_size_key) |s| cfg.font_size_key = s;
     if (jc.font_size_strip) |s| cfg.font_size_strip = s;
+    if (jc.mqtt_host) |h| cfg.mqtt_host = h;
+    if (jc.mqtt_port) |p| cfg.mqtt_port = p;
+    if (jc.mqtt_user) |u| cfg.mqtt_user = u;
+    if (jc.mqtt_pass) |p| cfg.mqtt_pass = p;
 
     for (jc.matrix_keys, 0..) |maybe, i| {
         if (i >= 8) break;
@@ -141,6 +184,20 @@ pub fn load(arena: std.mem.Allocator) Config {
                 cfg.soma_keys[i].r = rgb[0];
                 cfg.soma_keys[i].g = rgb[1];
                 cfg.soma_keys[i].b = rgb[2];
+            }
+        }
+    }
+    for (jc.mqtt_keys, 0..) |maybe, i| {
+        if (i >= 8) break;
+        const jk = maybe orelse continue;
+        if (jk.label) |v| cfg.mqtt_keys[i].label = v;
+        if (jk.topic) |v| cfg.mqtt_keys[i].topic = v;
+        if (jk.payload) |v| cfg.mqtt_keys[i].payload = v;
+        if (jk.color) |v| {
+            if (parseColor(v)) |rgb| {
+                cfg.mqtt_keys[i].r = rgb[0];
+                cfg.mqtt_keys[i].g = rgb[1];
+                cfg.mqtt_keys[i].b = rgb[2];
             }
         }
     }

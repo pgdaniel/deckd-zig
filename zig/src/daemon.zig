@@ -1,10 +1,13 @@
-//! The deckd daemon: Stream Deck Plus → matrix control API + soma player IPC.
+//! The deckd daemon: Stream Deck Plus → matrix control API + soma player IPC
+//! + MQTT broker.
 //!
 //! Pages (knob 4 push cycles them) swap what the 8 keys and the strip show:
 //!   MATRIX — keys direct-select matrix screens (white border = active),
 //!            strip shows screen name / auto-advance / soma now-playing.
 //!   SOMA   — keys are SomaFM channel presets + VIZ + STOP (border = playing),
 //!            strip shows channel / track / volume.
+//!   MQTT   — keys publish their configured topic/payload to the broker,
+//!            strip shows the broker and the last thing published.
 //!
 //! Knobs (fixed roles on all pages):
 //!   knob 1 rotate: soma volume        push: mute toggle
@@ -23,11 +26,12 @@ const image = @import("image.zig");
 const render = @import("render.zig");
 const matrix = @import("matrix.zig");
 const soma = @import("soma.zig");
+const mqtt = @import("mqtt.zig");
 const ws = @import("ws.zig");
 const config = @import("config.zig");
 const ttf = @import("ttf.zig");
 
-const Page = enum { matrix, soma, mirror };
+const Page = enum { matrix, soma, mirror, mqtt };
 
 const max_screens = 16;
 const name_len = 64;
@@ -37,6 +41,7 @@ const Daemon = struct {
     dev: *hid.Device,
     mx: matrix.Client,
     sm: soma.Client,
+    mq: mqtt.Client,
     feed: *ws.FrameFeed,
     cfg: *const config.Config,
     font: ?ttf.Font = null,
@@ -67,6 +72,12 @@ const Daemon = struct {
     sm_track_buf: [track_len]u8 = undefined,
     sm_track_len: usize = 0,
 
+    // mqtt state (publish-only, so "online" just means the last publish
+    // worked — optimistic until one fails)
+    mq_online: bool = true,
+    last_pub_buf: [128]u8 = undefined,
+    last_pub_len: usize = 0,
+
     // what's currently on the deck (redraw when the signature changes)
     keys_sig: u64 = 0,
     strip_sig: u64 = 0,
@@ -89,6 +100,10 @@ const Daemon = struct {
 
     fn somaTrack(self: *const Daemon) []const u8 {
         return self.sm_track_buf[0..self.sm_track_len];
+    }
+
+    fn lastPub(self: *const Daemon) []const u8 {
+        return self.last_pub_buf[0..self.last_pub_len];
     }
 
     fn copyInto(buf: []u8, len: *usize, s: []const u8) void {
@@ -148,6 +163,7 @@ const Daemon = struct {
         return switch (self.page) {
             .matrix, .mirror => if (self.mx_online) self.currentScreen() else "",
             .soma => if (self.sm_online and self.sm_playing) self.somaId() else "",
+            .mqtt => "", // publish-only: no per-key state to highlight
         };
     }
 
@@ -158,6 +174,9 @@ const Daemon = struct {
             },
             .soma => for (self.cfg.soma_keys, 0..) |ka, i| {
                 try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.id, self.activeKeyName()));
+            },
+            .mqtt => for (self.cfg.mqtt_keys, 0..) |ka, i| {
+                try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, false);
             },
         }
     }
@@ -230,6 +249,18 @@ const Daemon = struct {
                     render.drawTextCentered(&img, "NO SIGNAL", 38, 3, 255, 60, 60);
                 }
             },
+            .mqtt => {
+                if (self.cfg.mqtt_host.len == 0) {
+                    self.drawCenteredText(&img, "MQTT NOT CONFIGURED", 50, self.cfg.font_size_strip, 255, 60, 60);
+                } else if (!self.mq_online) {
+                    self.drawCenteredText(&img, "MQTT OFFLINE", 28, self.cfg.font_size_strip, 255, 60, 60);
+                    self.drawCenteredText(&img, self.cfg.mqtt_host[0..@min(self.cfg.mqtt_host.len, 40)], 60, 16, 140, 140, 160);
+                } else {
+                    self.drawCenteredText(&img, "MQTT", 28, self.cfg.font_size_strip, 240, 180, 60);
+                    self.drawCenteredText(&img, self.cfg.mqtt_host[0..@min(self.cfg.mqtt_host.len, 40)], 60, 16, 140, 140, 160);
+                    self.drawCenteredText(&img, self.lastPub()[0..@min(self.lastPub().len, 48)], 84, 16, 200, 160, 60);
+                }
+            },
         }
         var jpeg: std.ArrayList(u8) = .empty;
         try image.encodeJpeg(&img, 90, &jpeg, arena);
@@ -239,7 +270,7 @@ const Daemon = struct {
     fn keysSignature(self: *const Daemon) u64 {
         var h = std.hash.Wyhash.init(1);
         // Mirror page shows the same keys as the matrix page.
-        h.update(if (self.page == .soma) "soma" else "matrix");
+        h.update(if (self.page == .soma) "soma" else if (self.page == .mqtt) "mqtt" else "matrix");
         h.update(self.activeKeyName());
         return h.final();
     }
@@ -255,6 +286,8 @@ const Daemon = struct {
         h.update(self.somaChannel());
         h.update(self.somaTrack());
         h.update(&.{self.sm_volume});
+        h.update(if (self.mq_online) "y" else "n");
+        h.update(self.lastPub());
         return h.final();
     }
 
@@ -327,6 +360,19 @@ const Daemon = struct {
                         self.somaCmd(arena, c);
                     }
                 },
+                .mqtt => {
+                    const ka = self.cfg.mqtt_keys[i];
+                    if (ka.topic.len == 0) continue;
+                    std.debug.print("key {d} → mqtt {s} {s}\n", .{ i, ka.topic, ka.payload });
+                    self.mq.publish(ka.topic, ka.payload) catch {
+                        self.mq_online = false;
+                        continue;
+                    };
+                    self.mq_online = true;
+                    var line: [128]u8 = undefined;
+                    const s = std.fmt.bufPrint(&line, "{s} = {s}", .{ ka.topic, ka.payload }) catch "";
+                    copyInto(&self.last_pub_buf, &self.last_pub_len, s);
+                },
             }
         }
         self.prev_keys = states;
@@ -368,7 +414,8 @@ const Daemon = struct {
                     self.page = switch (self.page) {
                         .matrix => .soma,
                         .soma => .mirror,
-                        .mirror => .matrix,
+                        .mirror => .mqtt,
+                        .mqtt => .matrix,
                     };
                     std.debug.print("page → {s}\n", .{@tagName(self.page)});
                 },
@@ -396,6 +443,7 @@ pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
         .dev = dev,
         .mx = .{ .http = &http, .base = base_url },
         .sm = soma.Client.init(io),
+        .mq = .{ .io = io, .host = cfg.mqtt_host, .port = cfg.mqtt_port, .username = cfg.mqtt_user, .password = cfg.mqtt_pass },
         .feed = feed,
         .cfg = cfg,
         .brightness = cfg.brightness,

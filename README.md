@@ -9,6 +9,9 @@ controller for two local projects:
 - **[soma-zig](../soma-zig)** — the SomaFM terminal player (via its Unix-socket
   IPC).
 
+Plus a publish-only **MQTT** page: each key sends its configured
+topic/payload to a LAN broker, for lights or anything else that listens.
+
 Everything on the device works: the 8 LCD keys (120×120 JPEG each), the
 800×100 touch strip, and the 4 rotary encoder knobs (turn + push).
 
@@ -54,13 +57,21 @@ defaults in `zig/src/config.zig`:
   "font_size_key": 22,
   "font_size_strip": 30,
   "matrix_keys": [ { "label": "WEATHER", "screen": "weather-cyberpunk", "color": "ff8c00" } ],
-  "soma_keys":   [ { "label": "GROOVE",  "id": "groovesalad",        "color": "78dc78" } ]
+  "soma_keys":   [ { "label": "GROOVE",  "id": "groovesalad",        "color": "78dc78" } ],
+  "mqtt_host": "192.168.1.10",
+  "mqtt_port": 1883,
+  "mqtt_user": "",
+  "mqtt_pass": "",
+  "mqtt_keys": [ { "label": "LT ON", "topic": "home/lights/set", "payload": "ON", "color": "ffc850" } ]
 }
 ```
 
 Key lists patch the default 8-key maps **by index**; an entry may set just the
 fields it changes. Soma keys take any SomaFM channel id plus the special ids
-`viz` and `stop`. Knob roles are not configurable yet.
+`viz` and `stop`. MQTT keys publish `payload` to `topic` when pressed — an
+empty `topic` makes the key inert. `mqtt_host` must be a literal IP (or
+`localhost`); no DNS, no TLS — LAN brokers only. `mqtt_user`/`mqtt_pass` are
+optional. Knob roles are not configurable yet.
 
 ### Fonts
 
@@ -102,7 +113,7 @@ processes share the hidraw node and fight over the deck
 
 ## Controls
 
-**Knob 4 push cycles pages: MATRIX → SOMA → MIRROR.** Knob roles are fixed
+**Knob 4 push cycles pages: MATRIX → SOMA → MIRROR → MQTT.** Knob roles are fixed
 on all pages:
 
 | Knob | Rotate | Push |
@@ -145,6 +156,14 @@ the same feed `led-matrix-simulator.html` uses. Redraws are throttled to ~4
 fps. Keys behave like the MATRIX page, so you can switch screens while
 watching the mirror.
 
+### MQTT page
+
+Keys publish their configured topic/payload to the broker (QoS 0, one
+connection per press) — lights, switches, scripts, anything that subscribes.
+No per-key state readback (publish-only), so no active border. Strip: broker
+host and the last published `topic = payload`; `MQTT OFFLINE` if the last
+publish failed, `MQTT NOT CONFIGURED` until `mqtt_host` is set.
+
 ## Dev CLI
 
 ```
@@ -153,6 +172,7 @@ deckd dump            # hex-dump + parse input reports (press keys, turn knobs)
 deckd brightness 70   # panel backlight
 deckd reset           # device reset (feature report 0x03)
 deckd test-image      # orientation pattern on all keys + strip
+deckd pub home/lights/set ON   # one-off MQTT publish (broker from config; no deck needed)
 ```
 
 ## Wire protocol (verified on hardware)
@@ -188,6 +208,8 @@ the image into noise lines). 800×100 JPEG, no rotation needed.
   commands `vol N | vol ±N`, `mute`, `play [id]`, `stop`, `toggle`,
   `next`/`prev` (selection), `surf-next`/`surf-prev` (selection + play),
   `viz next`. Replies are one line (`ok` / `err ...`).
+- **MQTT broker** (outbound TCP, default port 1883): MQTT 3.1.1, publish-only,
+  QoS 0, optional username/password — implemented from scratch in `mqtt.zig`.
 
 ## Files
 
@@ -199,6 +221,7 @@ the image into noise lines). 800×100 JPEG, no rotation needed.
 | `zig/src/render.zig` | text/shape drawing (`font8x8.zig`, public-domain 8×8 font) |
 | `zig/src/matrix.zig` | matrix_sim HTTP control client |
 | `zig/src/soma.zig` | soma-zig IPC client |
+| `zig/src/mqtt.zig` | publish-only MQTT 3.1.1 client (QoS 0, no TLS) |
 | `zig/src/ws.zig` | WebSocket client for the matrix framebuffer stream |
 | `zig/src/config.zig` | `~/.config/deckd/config.json` loading + default key maps |
 | `zig/src/daemon.zig` | pages, knob wiring, strip layouts, main loop |

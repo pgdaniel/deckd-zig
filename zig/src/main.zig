@@ -4,6 +4,7 @@ const deck = @import("deck.zig");
 const image = @import("image.zig");
 const daemon = @import("daemon.zig");
 const config = @import("config.zig");
+const mqtt = @import("mqtt.zig");
 
 fn usage() noreturn {
     std.debug.print(
@@ -15,6 +16,7 @@ fn usage() noreturn {
         \\  deckd brightness <0-100>    set panel brightness
         \\  deckd reset                 reset the device
         \\  deckd test-image            orientation test pattern on all keys + strip
+        \\  deckd pub <topic> <payload> publish one MQTT message (broker from config; no deck needed)
         \\  deckd run [matrix-url]      daemon: keys/knobs drive the matrix (default http://localhost:8787)
         \\
     , .{});
@@ -41,11 +43,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     var device_arg: ?[]const u8 = null;
     var positional: ?[]const u8 = null;
+    var positional2: ?[]const u8 = null;
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--device")) {
             device_arg = args.next() orelse usage();
+        } else if (positional == null) {
+            positional = arg;
         } else {
-            positional = positional orelse arg;
+            positional2 = positional2 orelse arg;
         }
     }
 
@@ -108,6 +113,22 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try image.encodeJpeg(&strip, 90, &jpeg, alloc);
         try deck.setStripImage(&dev, 0, 0, deck.strip_w, deck.strip_h, jpeg.items);
         std.debug.print("strip: {d} bytes jpeg\n", .{jpeg.items.len});
+    } else if (std.mem.eql(u8, cmd, "pub")) {
+        const topic = positional orelse usage();
+        const payload = positional2 orelse usage();
+        var cfg_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        const cfg = config.load(cfg_arena.allocator());
+        if (cfg.mqtt_host.len == 0) {
+            std.debug.print("mqtt_host not set in ~/.config/deckd/config.json\n", .{});
+            std.process.exit(1);
+        }
+        var io_threaded: std.Io.Threaded = .init_single_threaded;
+        const mq: mqtt.Client = .{ .io = io_threaded.io(), .host = cfg.mqtt_host, .port = cfg.mqtt_port, .username = cfg.mqtt_user, .password = cfg.mqtt_pass };
+        mq.publish(topic, payload) catch |err| {
+            std.debug.print("publish failed: {s}\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        std.debug.print("published {s} → {s}\n", .{ topic, payload });
     } else if (std.mem.eql(u8, cmd, "run")) {
         var dev = try openDeck(device_arg);
         defer dev.close();
