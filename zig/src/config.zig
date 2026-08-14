@@ -2,7 +2,7 @@
 //! anything missing falls back to the defaults below).
 //!
 //! {
-//!   "matrix_url": "http://192.168.1.160:8787",
+//!   "matrix_url": "http://192.168.1.109:8787",
 //!   "brightness": 80,
 //!   "matrix_keys": [ {"label": "WEATHER", "screen": "weather-cyberpunk", "color": "ff8c00"}, ... ],
 //!   "soma_keys":   [ {"label": "GROOVE",  "id": "groovesalad",        "color": "78dc78"}, ... ],

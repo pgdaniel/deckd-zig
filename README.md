@@ -31,7 +31,7 @@ Vendored: `stb_image_write.h` for JPEG encoding (keys/strip only accept JPEG).
 
 ```
 deckd run                          # uses ~/.config/deckd/config.json
-deckd run http://192.168.1.160:8787   # CLI URL beats the config file
+deckd run http://192.168.1.109:8787   # CLI URL beats the config file
 ```
 
 The device is auto-discovered by scanning `/sys/class/hidraw/*/device/uevent`
@@ -51,7 +51,7 @@ defaults in `zig/src/config.zig`:
 
 ```json
 {
-  "matrix_url": "http://192.168.1.160:8787",
+  "matrix_url": "http://192.168.1.109:8787",
   "brightness": 80,
   "font_path": "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Bold.ttf",
   "font_size_key": 22,
