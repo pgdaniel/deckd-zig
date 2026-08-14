@@ -21,7 +21,9 @@
 //! the network for state, so an unreachable matrix can't stall key/knob
 //! handling. Commands (key presses, knob turns) still go out
 //! synchronously — fast when the target is up, and skipped entirely when
-//! the latest snapshot already says it's offline.
+//! the latest snapshot already says it's offline. MQTT key presses just
+//! enqueue the publish; a publisher thread does the broker I/O, so a
+//! dead broker can't stall the deck either.
 //!
 //! Memory: transient work (images, JPEGs, HTTP bodies, JSON) uses a per-cycle
 //! arena reset each loop iteration; state that survives an iteration lives in
@@ -69,6 +71,13 @@ const PollState = struct {
     sm_track_buf: [track_len]u8 = undefined,
     sm_track_len: usize = 0,
 
+    // Publisher-thread-owned (pubLoop) — carried across swaps, NOT
+    // refreshed by polling. "online" just means the last publish worked —
+    // optimistic until one fails.
+    mq_online: bool = true,
+    last_pub_buf: [128]u8 = undefined,
+    last_pub_len: usize = 0,
+
     fn currentScreen(self: *const PollState) []const u8 {
         return self.current_buf[0..self.current_len];
     }
@@ -83,6 +92,27 @@ const PollState = struct {
 
     fn somaTrack(self: *const PollState) []const u8 {
         return self.sm_track_buf[0..self.sm_track_len];
+    }
+
+    fn lastPub(self: *const PollState) []const u8 {
+        return self.last_pub_buf[0..self.last_pub_len];
+    }
+};
+
+/// One queued MQTT publish. Fixed-size so the queue never allocates;
+/// oversized topics/payloads are rejected at enqueue time.
+const PubItem = struct {
+    topic_buf: [128]u8 = undefined,
+    topic_len: usize = 0,
+    payload_buf: [256]u8 = undefined,
+    payload_len: usize = 0,
+
+    fn topic(self: *const PubItem) []const u8 {
+        return self.topic_buf[0..self.topic_len];
+    }
+
+    fn payload(self: *const PubItem) []const u8 {
+        return self.payload_buf[0..self.payload_len];
     }
 };
 
@@ -103,17 +133,20 @@ const Daemon = struct {
     // Polled matrix/soma state (see PollState). state_gen is bumped on
     // every swap/write-back so the event loop knows to re-sync the display;
     // cmd_gen guards against the poller clobbering a just-issued command
-    // with state that predates it.
+    // with state that predates it. state_mtx also guards the publish queue
+    // below — one lock, always tiny memcpy critical sections.
     state: PollState = .{},
     state_mtx: std.Io.Mutex = .init,
     state_gen: u64 = 0,
     cmd_gen: u64 = 0,
 
-    // mqtt state (publish-only, so "online" just means the last publish
-    // worked — optimistic until one fails). Event-loop local.
-    mq_online: bool = true,
-    last_pub_buf: [128]u8 = undefined,
-    last_pub_len: usize = 0,
+    // MQTT publish queue: event loop enqueues, pubLoop drains. Ring buffer;
+    // when full, new presses are dropped (freshest intent is what matters,
+    // and a full queue means the broker is down anyway).
+    pub_queue: [16]PubItem = undefined,
+    pub_head: usize = 0, // next write
+    pub_tail: usize = 0, // next read
+    pub_dropped: u64 = 0,
 
     // what's currently on the deck (redraw when the signature changes)
     keys_sig: u64 = 0,
@@ -140,11 +173,16 @@ const Daemon = struct {
     /// Poller thread: swap in freshly-polled state — unless a command was
     /// written back while we were polling (this round's data predates the
     /// command, so dropping it avoids visibly reverting the deck; the next
-    /// round, ≤2 s out, converges).
-    fn swapState(self: *Daemon, next: PollState, gen_at_start: u64) void {
+    /// round, ≤2 s out, converges). The mqtt fields are the publisher
+    /// thread's business and are carried across untouched.
+    fn swapState(self: *Daemon, next_in: PollState, gen_at_start: u64) void {
         self.state_mtx.lockUncancelable(self.io);
         defer self.state_mtx.unlock(self.io);
         if (self.cmd_gen != gen_at_start) return;
+        var next = next_in;
+        next.mq_online = self.state.mq_online;
+        next.last_pub_buf = self.state.last_pub_buf;
+        next.last_pub_len = self.state.last_pub_len;
         self.state = next;
         self.state_gen +%= 1;
     }
@@ -187,8 +225,47 @@ const Daemon = struct {
         self.state_gen +%= 1;
     }
 
-    fn lastPub(self: *const Daemon) []const u8 {
-        return self.last_pub_buf[0..self.last_pub_len];
+    /// Event loop: queue a publish for pubLoop. Never blocks on the
+    /// network — the worst case is a full queue (broker down), in which
+    /// case the press is dropped and logged.
+    fn enqueuePublish(self: *Daemon, topic: []const u8, payload: []const u8) void {
+        if (topic.len == 0 or topic.len > 128 or payload.len > 256) {
+            std.debug.print("mqtt: topic/payload too long, dropped\n", .{});
+            return;
+        }
+        self.state_mtx.lockUncancelable(self.io);
+        defer self.state_mtx.unlock(self.io);
+        const next = (self.pub_head + 1) % self.pub_queue.len;
+        if (next == self.pub_tail) {
+            self.pub_dropped +%= 1;
+            std.debug.print("mqtt: publish queue full, dropped ({d} total)\n", .{self.pub_dropped});
+            return;
+        }
+        var item = &self.pub_queue[self.pub_head];
+        @memcpy(item.topic_buf[0..topic.len], topic);
+        item.topic_len = topic.len;
+        @memcpy(item.payload_buf[0..payload.len], payload);
+        item.payload_len = payload.len;
+        self.pub_head = next;
+    }
+
+    /// pubLoop: take the oldest queued publish, or null when empty.
+    fn dequeuePublish(self: *Daemon) ?PubItem {
+        self.state_mtx.lockUncancelable(self.io);
+        defer self.state_mtx.unlock(self.io);
+        if (self.pub_tail == self.pub_head) return null;
+        const item = self.pub_queue[self.pub_tail];
+        self.pub_tail = (self.pub_tail + 1) % self.pub_queue.len;
+        return item;
+    }
+
+    /// pubLoop: record the outcome of a publish for the strip.
+    fn notePublished(self: *Daemon, ok: bool, line: []const u8) void {
+        self.state_mtx.lockUncancelable(self.io);
+        defer self.state_mtx.unlock(self.io);
+        self.state.mq_online = ok;
+        if (ok) copyInto(&self.state.last_pub_buf, &self.state.last_pub_len, line);
+        self.state_gen +%= 1;
     }
 
     fn copyInto(buf: []u8, len: *usize, s: []const u8) void {
@@ -312,13 +389,13 @@ const Daemon = struct {
             .mqtt => {
                 if (self.cfg.mqtt_host.len == 0) {
                     self.drawCenteredText(&img, "MQTT NOT CONFIGURED", 50, self.cfg.font_size_strip, 255, 60, 60);
-                } else if (!self.mq_online) {
+                } else if (!snap.mq_online) {
                     self.drawCenteredText(&img, "MQTT OFFLINE", 28, self.cfg.font_size_strip, 255, 60, 60);
                     self.drawCenteredText(&img, self.cfg.mqtt_host[0..@min(self.cfg.mqtt_host.len, 40)], 60, 16, 140, 140, 160);
                 } else {
                     self.drawCenteredText(&img, "MQTT", 28, self.cfg.font_size_strip, 240, 180, 60);
                     self.drawCenteredText(&img, self.cfg.mqtt_host[0..@min(self.cfg.mqtt_host.len, 40)], 60, 16, 140, 140, 160);
-                    self.drawCenteredText(&img, self.lastPub()[0..@min(self.lastPub().len, 48)], 84, 16, 200, 160, 60);
+                    self.drawCenteredText(&img, snap.lastPub()[0..@min(snap.lastPub().len, 48)], 84, 16, 200, 160, 60);
                 }
             },
         }
@@ -346,8 +423,8 @@ const Daemon = struct {
         h.update(snap.somaChannel());
         h.update(snap.somaTrack());
         h.update(&.{snap.sm_volume});
-        h.update(if (self.mq_online) "y" else "n");
-        h.update(self.lastPub());
+        h.update(if (snap.mq_online) "y" else "n");
+        h.update(snap.lastPub());
         return h.final();
     }
 
@@ -422,14 +499,7 @@ const Daemon = struct {
                     const ka = self.cfg.mqtt_keys[i];
                     if (ka.topic.len == 0) continue;
                     std.debug.print("key {d} → mqtt {s} {s}\n", .{ i, ka.topic, ka.payload });
-                    self.mq.publish(ka.topic, ka.payload) catch {
-                        self.mq_online = false;
-                        continue;
-                    };
-                    self.mq_online = true;
-                    var line: [128]u8 = undefined;
-                    const s = std.fmt.bufPrint(&line, "{s} = {s}", .{ ka.topic, ka.payload }) catch "";
-                    copyInto(&self.last_pub_buf, &self.last_pub_len, s);
+                    self.enqueuePublish(ka.topic, ka.payload);
                 },
             }
         }
@@ -517,6 +587,11 @@ pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
     // slow/dead matrix or soma never stalls input handling on the deck.
     const poll_thread = try std.Thread.spawn(.{}, pollLoop, .{ io, &d });
     poll_thread.detach();
+
+    // MQTT publishes run on their own thread too: key presses only enqueue,
+    // so a dead broker can't stall the deck either.
+    const pub_thread = try std.Thread.spawn(.{}, pubLoop, .{ io, &d });
+    pub_thread.detach();
 
     var cycle = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer cycle.deinit();
@@ -646,6 +721,26 @@ fn pollLoop(io: std.Io, d: *Daemon) void {
 
         d.swapState(next, gen_at_start);
         std.Io.sleep(io, .fromMilliseconds(2000), .awake) catch {};
+    }
+}
+
+/// Publisher thread: drain the MQTT publish queue. All broker I/O —
+/// including the multi-second TCP connect stall when the broker is down —
+/// happens here, never on the event loop. ~100 ms worst-case latency from
+/// key press to publish, imperceptible next to the key's own debounce.
+fn pubLoop(io: std.Io, d: *Daemon) void {
+    while (true) {
+        while (d.dequeuePublish()) |item| {
+            d.mq.publish(item.topic(), item.payload()) catch |err| {
+                std.debug.print("mqtt: publish failed: {s}\n", .{@errorName(err)});
+                d.notePublished(false, "");
+                continue;
+            };
+            var line: [128]u8 = undefined;
+            const s = std.fmt.bufPrint(&line, "{s} = {s}", .{ item.topic(), item.payload() }) catch "";
+            d.notePublished(true, s);
+        }
+        std.Io.sleep(io, .fromMilliseconds(100), .awake) catch {};
     }
 }
 
