@@ -16,6 +16,13 @@
 //!   knob 4 rotate: deck LCD brightness  push: switch page
 //! Strip left/right swipe jogs matrix screens too.
 //!
+//! Threading: a poller thread refreshes matrix/soma state every 2 s and
+//! swaps it in wholesale (see PollState); the event loop never blocks on
+//! the network for state, so an unreachable matrix can't stall key/knob
+//! handling. Commands (key presses, knob turns) still go out
+//! synchronously — fast when the target is up, and skipped entirely when
+//! the latest snapshot already says it's offline.
+//!
 //! Memory: transient work (images, JPEGs, HTTP bodies, JSON) uses a per-cycle
 //! arena reset each loop iteration; state that survives an iteration lives in
 //! the fixed buffers below.
@@ -37,8 +44,51 @@ const max_screens = 16;
 const name_len = 64;
 const track_len = 128;
 
+/// Matrix/soma state, refreshed by the poller thread every 2 s and swapped
+/// in under Daemon.state_mtx. The event loop works on snapshots (see
+/// Daemon.snapshot), so it always reads a consistent view and never blocks
+/// on the network.
+const PollState = struct {
+    mx_online: bool = false,
+    auto_advance: bool = false,
+    current_buf: [name_len]u8 = undefined,
+    current_len: usize = 0,
+    // Jog list: all screens in panel order (the deck can reach disabled
+    // screens too — "enabled" only governs the auto-advance rotation).
+    screen_buf: [max_screens][name_len]u8 = undefined,
+    screen_lens: [max_screens]usize = .{0} ** max_screens,
+    screen_count: usize = 0,
+
+    sm_online: bool = false,
+    sm_playing: bool = false,
+    sm_volume: u8 = 0,
+    sm_channel_buf: [name_len]u8 = undefined,
+    sm_channel_len: usize = 0,
+    sm_id_buf: [name_len]u8 = undefined,
+    sm_id_len: usize = 0,
+    sm_track_buf: [track_len]u8 = undefined,
+    sm_track_len: usize = 0,
+
+    fn currentScreen(self: *const PollState) []const u8 {
+        return self.current_buf[0..self.current_len];
+    }
+
+    fn somaChannel(self: *const PollState) []const u8 {
+        return self.sm_channel_buf[0..self.sm_channel_len];
+    }
+
+    fn somaId(self: *const PollState) []const u8 {
+        return self.sm_id_buf[0..self.sm_id_len];
+    }
+
+    fn somaTrack(self: *const PollState) []const u8 {
+        return self.sm_track_buf[0..self.sm_track_len];
+    }
+};
+
 const Daemon = struct {
     dev: *hid.Device,
+    io: std.Io,
     mx: matrix.Client,
     sm: soma.Client,
     mq: mqtt.Client,
@@ -50,30 +100,17 @@ const Daemon = struct {
     mirror_drawn_counter: u64 = 0,
     last_mirror_ms: i64 = 0,
 
-    // matrix state
-    current_buf: [name_len]u8 = undefined,
-    current_len: usize = 0,
-    // Jog list: all screens in panel order (the deck can reach disabled
-    // screens too — "enabled" only governs the auto-advance rotation).
-    screen_buf: [max_screens][name_len]u8 = undefined,
-    screen_lens: [max_screens]usize = .{0} ** max_screens,
-    screen_count: usize = 0,
-    auto_advance: bool = false,
-    mx_online: bool = false,
-
-    // soma state
-    sm_online: bool = false,
-    sm_playing: bool = false,
-    sm_volume: u8 = 0,
-    sm_channel_buf: [name_len]u8 = undefined,
-    sm_channel_len: usize = 0,
-    sm_id_buf: [name_len]u8 = undefined,
-    sm_id_len: usize = 0,
-    sm_track_buf: [track_len]u8 = undefined,
-    sm_track_len: usize = 0,
+    // Polled matrix/soma state (see PollState). state_gen is bumped on
+    // every swap/write-back so the event loop knows to re-sync the display;
+    // cmd_gen guards against the poller clobbering a just-issued command
+    // with state that predates it.
+    state: PollState = .{},
+    state_mtx: std.Io.Mutex = .init,
+    state_gen: u64 = 0,
+    cmd_gen: u64 = 0,
 
     // mqtt state (publish-only, so "online" just means the last publish
-    // worked — optimistic until one fails)
+    // worked — optimistic until one fails). Event-loop local.
     mq_online: bool = true,
     last_pub_buf: [128]u8 = undefined,
     last_pub_len: usize = 0,
@@ -86,20 +123,68 @@ const Daemon = struct {
     prev_keys: [deck.key_count]bool = .{false} ** deck.key_count,
     prev_dials: [deck.dial_count]bool = .{false} ** deck.dial_count,
 
-    fn currentScreen(self: *const Daemon) []const u8 {
-        return self.current_buf[0..self.current_len];
+    /// Consistent copy of the latest polled state. ~2 KB stack copy, lock
+    /// held only for the memcpy.
+    fn snapshot(self: *Daemon) PollState {
+        self.state_mtx.lockUncancelable(self.io);
+        defer self.state_mtx.unlock(self.io);
+        return self.state;
     }
 
-    fn somaChannel(self: *const Daemon) []const u8 {
-        return self.sm_channel_buf[0..self.sm_channel_len];
+    fn generation(self: *Daemon) u64 {
+        self.state_mtx.lockUncancelable(self.io);
+        defer self.state_mtx.unlock(self.io);
+        return self.state_gen;
     }
 
-    fn somaId(self: *const Daemon) []const u8 {
-        return self.sm_id_buf[0..self.sm_id_len];
+    /// Poller thread: swap in freshly-polled state — unless a command was
+    /// written back while we were polling (this round's data predates the
+    /// command, so dropping it avoids visibly reverting the deck; the next
+    /// round, ≤2 s out, converges).
+    fn swapState(self: *Daemon, next: PollState, gen_at_start: u64) void {
+        self.state_mtx.lockUncancelable(self.io);
+        defer self.state_mtx.unlock(self.io);
+        if (self.cmd_gen != gen_at_start) return;
+        self.state = next;
+        self.state_gen +%= 1;
     }
 
-    fn somaTrack(self: *const Daemon) []const u8 {
-        return self.sm_track_buf[0..self.sm_track_len];
+    /// Event loop, after a successful matrix command: reflect it at once
+    /// instead of waiting for the poller's next round.
+    fn noteScreenSet(self: *Daemon, name: []const u8) void {
+        self.state_mtx.lockUncancelable(self.io);
+        defer self.state_mtx.unlock(self.io);
+        copyInto(&self.state.current_buf, &self.state.current_len, name);
+        self.cmd_gen +%= 1;
+        self.state_gen +%= 1;
+    }
+
+    fn noteAutoAdvanceSet(self: *Daemon, on: bool) void {
+        self.state_mtx.lockUncancelable(self.io);
+        defer self.state_mtx.unlock(self.io);
+        self.state.auto_advance = on;
+        self.cmd_gen +%= 1;
+        self.state_gen +%= 1;
+    }
+
+    /// Event loop, after a soma command: quick status refresh written back
+    /// under the same protocol. null = soma unreachable.
+    fn noteSomaStatus(self: *Daemon, st: ?soma.Status) void {
+        self.state_mtx.lockUncancelable(self.io);
+        defer self.state_mtx.unlock(self.io);
+        if (st) |s| {
+            self.state.sm_online = true;
+            self.state.sm_playing = s.playing or s.connecting;
+            self.state.sm_volume = s.volume;
+            copyInto(&self.state.sm_channel_buf, &self.state.sm_channel_len, s.channel);
+            copyInto(&self.state.sm_id_buf, &self.state.sm_id_len, s.channel_id);
+            copyInto(&self.state.sm_track_buf, &self.state.sm_track_len, s.track);
+        } else {
+            self.state.sm_online = false;
+            self.state.sm_playing = false;
+        }
+        self.cmd_gen +%= 1;
+        self.state_gen +%= 1;
     }
 
     fn lastPub(self: *const Daemon) []const u8 {
@@ -113,67 +198,42 @@ const Daemon = struct {
     }
 
     // ----------------------------------------------------------
-    // State polling
+    // State polling happens on the poller thread (see pollLoop).
     // ----------------------------------------------------------
-    fn pollMatrix(self: *Daemon, arena: std.mem.Allocator) void {
-        const cfg = self.mx.getConfig(arena) catch {
-            self.mx_online = false;
-            return;
-        };
-        self.mx_online = true;
-        copyInto(&self.current_buf, &self.current_len, cfg.current);
-        self.auto_advance = cfg.auto_advance;
-        const names = cfg.allNames(arena) catch &.{};
-        self.screen_count = @min(names.len, max_screens);
-        for (names[0..self.screen_count], 0..) |name, i| {
-            copyInto(&self.screen_buf[i], &self.screen_lens[i], name);
-        }
-    }
-
-    fn pollSoma(self: *Daemon, arena: std.mem.Allocator) void {
-        const st = self.sm.status(arena) catch {
-            self.sm_online = false;
-            self.sm_playing = false;
-            return;
-        };
-        self.sm_online = true;
-        self.sm_playing = st.playing or st.connecting;
-        self.sm_volume = st.volume;
-        copyInto(&self.sm_channel_buf, &self.sm_channel_len, st.channel);
-        copyInto(&self.sm_id_buf, &self.sm_id_len, st.channel_id);
-        copyInto(&self.sm_track_buf, &self.sm_track_len, st.track);
-    }
-
     fn somaCmd(self: *Daemon, arena: std.mem.Allocator, cmd: []const u8) void {
         _ = self.sm.command(arena, cmd) catch {
-            self.sm_online = false;
-            self.sm_playing = false;
+            self.noteSomaStatus(null);
             return;
         };
         // The command is applied on soma's next frame (~40ms); give it a
         // moment, then refresh so the strip reflects the change at once.
+        // Local socket, so this stays quick even when the matrix is down.
         std.Io.sleep(self.sm.io, .fromMilliseconds(60), .awake) catch {};
-        self.pollSoma(arena);
+        const st = self.sm.status(arena) catch {
+            self.noteSomaStatus(null);
+            return;
+        };
+        self.noteSomaStatus(st);
     }
 
     // ----------------------------------------------------------
     // Drawing
     // ----------------------------------------------------------
-    fn activeKeyName(self: *const Daemon) []const u8 {
+    fn activeKeyName(self: *const Daemon, snap: *const PollState) []const u8 {
         return switch (self.page) {
-            .matrix, .mirror => if (self.mx_online) self.currentScreen() else "",
-            .soma => if (self.sm_online and self.sm_playing) self.somaId() else "",
+            .matrix, .mirror => if (snap.mx_online) snap.currentScreen() else "",
+            .soma => if (snap.sm_online and snap.sm_playing) snap.somaId() else "",
             .mqtt => "", // publish-only: no per-key state to highlight
         };
     }
 
-    fn drawKeys(self: *Daemon, arena: std.mem.Allocator) !void {
+    fn drawKeys(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState) !void {
         switch (self.page) {
             .matrix, .mirror => for (self.cfg.matrix_keys, 0..) |ka, i| {
-                try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.screen, self.activeKeyName()));
+                try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.screen, self.activeKeyName(snap)));
             },
             .soma => for (self.cfg.soma_keys, 0..) |ka, i| {
-                try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.id, self.activeKeyName()));
+                try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.id, self.activeKeyName(snap)));
             },
             .mqtt => for (self.cfg.mqtt_keys, 0..) |ka, i| {
                 try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, false);
@@ -202,31 +262,31 @@ const Daemon = struct {
         }
     }
 
-    fn drawStrip(self: *Daemon, arena: std.mem.Allocator) !void {
+    fn drawStrip(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState) !void {
         var img = try image.Image.init(arena, deck.strip_w, deck.strip_h);
         img.fill(8, 8, 12);
         switch (self.page) {
             .matrix => {
-                if (!self.mx_online) {
+                if (!snap.mx_online) {
                     self.drawCenteredText(&img, "MATRIX OFFLINE", 50, self.cfg.font_size_strip, 255, 60, 60);
                 } else {
-                    self.drawCenteredText(&img, self.currentScreen(), 28, self.cfg.font_size_strip, 255, 120, 200);
-                    self.drawCenteredText(&img, if (self.auto_advance) "AUTO ON" else "AUTO OFF", 60, 16, 120, 120, 140);
-                    if (self.sm_playing) {
+                    self.drawCenteredText(&img, snap.currentScreen(), 28, self.cfg.font_size_strip, 255, 120, 200);
+                    self.drawCenteredText(&img, if (snap.auto_advance) "AUTO ON" else "AUTO OFF", 60, 16, 120, 120, 140);
+                    if (snap.sm_playing) {
                         var line: [name_len + track_len + 4]u8 = undefined;
-                        const s = std.fmt.bufPrint(&line, "{s} - {s}", .{ self.somaChannel(), self.somaTrack() }) catch "";
+                        const s = std.fmt.bufPrint(&line, "{s} - {s}", .{ snap.somaChannel(), snap.somaTrack() }) catch "";
                         self.drawCenteredText(&img, s[0..@min(s.len, 48)], 84, 16, 90, 200, 200);
                     }
                 }
             },
             .soma => {
-                if (!self.sm_online) {
+                if (!snap.sm_online) {
                     self.drawCenteredText(&img, "SOMA OFFLINE", 50, self.cfg.font_size_strip, 255, 60, 60);
                 } else {
-                    self.drawCenteredText(&img, if (self.sm_playing) self.somaChannel() else "SOMA (stopped)", 28, self.cfg.font_size_strip, 120, 240, 140);
-                    self.drawCenteredText(&img, self.somaTrack()[0..@min(self.somaTrack().len, 48)], 60, 16, 140, 140, 160);
+                    self.drawCenteredText(&img, if (snap.sm_playing) snap.somaChannel() else "SOMA (stopped)", 28, self.cfg.font_size_strip, 120, 240, 140);
+                    self.drawCenteredText(&img, snap.somaTrack()[0..@min(snap.somaTrack().len, 48)], 60, 16, 140, 140, 160);
                     var vol_buf: [16]u8 = undefined;
-                    const vol = std.fmt.bufPrint(&vol_buf, "VOL {d}%", .{self.sm_volume}) catch "";
+                    const vol = std.fmt.bufPrint(&vol_buf, "VOL {d}%", .{snap.sm_volume}) catch "";
                     self.drawCenteredText(&img, vol, 84, 16, 200, 200, 120);
                 }
             },
@@ -267,39 +327,39 @@ const Daemon = struct {
         try deck.setStripImage(self.dev, 0, 0, deck.strip_w, deck.strip_h, jpeg.items);
     }
 
-    fn keysSignature(self: *const Daemon) u64 {
+    fn keysSignature(self: *const Daemon, snap: *const PollState) u64 {
         var h = std.hash.Wyhash.init(1);
         // Mirror page shows the same keys as the matrix page.
         h.update(if (self.page == .soma) "soma" else if (self.page == .mqtt) "mqtt" else "matrix");
-        h.update(self.activeKeyName());
+        h.update(self.activeKeyName(snap));
         return h.final();
     }
 
-    fn stripSignature(self: *const Daemon) u64 {
+    fn stripSignature(self: *const Daemon, snap: *const PollState) u64 {
         var h = std.hash.Wyhash.init(2);
         h.update(@tagName(self.page));
-        h.update(if (self.mx_online) "y" else "n");
-        h.update(self.currentScreen());
-        h.update(if (self.auto_advance) "y" else "n");
-        h.update(if (self.sm_online) "y" else "n");
-        h.update(if (self.sm_playing) "y" else "n");
-        h.update(self.somaChannel());
-        h.update(self.somaTrack());
-        h.update(&.{self.sm_volume});
+        h.update(if (snap.mx_online) "y" else "n");
+        h.update(snap.currentScreen());
+        h.update(if (snap.auto_advance) "y" else "n");
+        h.update(if (snap.sm_online) "y" else "n");
+        h.update(if (snap.sm_playing) "y" else "n");
+        h.update(snap.somaChannel());
+        h.update(snap.somaTrack());
+        h.update(&.{snap.sm_volume});
         h.update(if (self.mq_online) "y" else "n");
         h.update(self.lastPub());
         return h.final();
     }
 
-    fn syncDisplay(self: *Daemon, arena: std.mem.Allocator) !void {
-        const ks = self.keysSignature();
-        const ss = self.stripSignature();
+    fn syncDisplay(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState) !void {
+        const ks = self.keysSignature(snap);
+        const ss = self.stripSignature(snap);
         if (ks != self.keys_sig) {
-            try self.drawKeys(arena);
+            try self.drawKeys(arena, snap);
             self.keys_sig = ks;
         }
         if (ss != self.strip_sig) {
-            try self.drawStrip(arena);
+            try self.drawStrip(arena, snap);
             self.strip_sig = ss;
         }
     }
@@ -307,8 +367,8 @@ const Daemon = struct {
     /// Like syncDisplay, but a dead device propagates so the event loop
     /// can hand off to the reconnect logic instead of spinning on a
     /// corpse fd.
-    fn syncDisplayChecked(self: *Daemon, arena: std.mem.Allocator) error{DeviceGone}!void {
-        self.syncDisplay(arena) catch |err| switch (err) {
+    fn syncDisplayChecked(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState) error{DeviceGone}!void {
+        self.syncDisplay(arena, snap) catch |err| switch (err) {
             error.DeviceGone => return error.DeviceGone,
             else => {},
         };
@@ -317,35 +377,33 @@ const Daemon = struct {
     // ----------------------------------------------------------
     // Actions
     // ----------------------------------------------------------
-    fn jogMatrix(self: *Daemon, arena: std.mem.Allocator, dir: i8) void {
-        if (!self.mx_online or self.screen_count == 0) return;
+    fn jogMatrix(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState, dir: i8) void {
+        if (!snap.mx_online or snap.screen_count == 0) return;
         var pos: usize = 0;
         var i: usize = 0;
-        while (i < self.screen_count) : (i += 1) {
-            if (std.mem.eql(u8, self.screen_buf[i][0..self.screen_lens[i]], self.currentScreen())) pos = i;
+        while (i < snap.screen_count) : (i += 1) {
+            if (std.mem.eql(u8, snap.screen_buf[i][0..snap.screen_lens[i]], snap.currentScreen())) pos = i;
         }
-        const n = self.screen_count;
+        const n = snap.screen_count;
         const next = if (dir >= 0) (pos + 1) % n else (pos + n - 1) % n;
-        const name = self.screen_buf[next][0..self.screen_lens[next]];
-        self.mx.showScreen(arena, name) catch {
-            self.mx_online = false;
-            return;
-        };
-        copyInto(&self.current_buf, &self.current_len, name);
+        const name = snap.screen_buf[next][0..snap.screen_lens[next]];
+        self.mx.showScreen(arena, name) catch return; // poller marks it offline
+        self.noteScreenSet(name);
     }
 
-    fn onKeys(self: *Daemon, arena: std.mem.Allocator, states: [deck.key_count]bool) void {
+    fn onKeys(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState, states: [deck.key_count]bool) void {
         for (states, 0..) |pressed, i| {
             if (!pressed or self.prev_keys[i]) continue;
             switch (self.page) {
                 .matrix, .mirror => {
                     const ka = self.cfg.matrix_keys[i];
+                    // Skip the (blocking) HTTP call entirely when the latest
+                    // snapshot already says the matrix is down — the poller
+                    // will flip it back when it's reachable again.
+                    if (!snap.mx_online) continue;
                     std.debug.print("key {d} → matrix {s}\n", .{ i, ka.screen });
-                    self.mx.showScreen(arena, ka.screen) catch {
-                        self.mx_online = false;
-                        continue;
-                    };
-                    copyInto(&self.current_buf, &self.current_len, ka.screen);
+                    self.mx.showScreen(arena, ka.screen) catch continue;
+                    self.noteScreenSet(ka.screen);
                 },
                 .soma => {
                     const ka = self.cfg.soma_keys[i];
@@ -378,13 +436,13 @@ const Daemon = struct {
         self.prev_keys = states;
     }
 
-    fn onDialDeltas(self: *Daemon, arena: std.mem.Allocator, deltas: [deck.dial_count]i8) void {
+    fn onDialDeltas(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState, deltas: [deck.dial_count]i8) void {
         for (deltas, 0..) |delta, i| {
             if (delta == 0) continue;
             switch (i) {
                 0 => self.somaCmd(arena, if (delta > 0) "vol +5" else "vol -5"),
                 1 => self.somaCmd(arena, if (delta > 0) "surf-next" else "surf-prev"),
-                2 => self.jogMatrix(arena, if (delta > 0) 1 else -1),
+                2 => self.jogMatrix(arena, snap, if (delta > 0) 1 else -1),
                 3 => {
                     const step: i16 = @as(i16, delta) * 5;
                     const next = std.math.clamp(@as(i16, self.brightness) + step, 0, 100);
@@ -396,19 +454,16 @@ const Daemon = struct {
         }
     }
 
-    fn onDialPresses(self: *Daemon, arena: std.mem.Allocator, presses: [deck.dial_count]bool) void {
+    fn onDialPresses(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState, presses: [deck.dial_count]bool) void {
         for (presses, 0..) |pressed, i| {
             if (!pressed or self.prev_dials[i]) continue;
             switch (i) {
                 0 => self.somaCmd(arena, "mute"),
                 1 => self.somaCmd(arena, "toggle"),
                 2 => {
-                    if (!self.mx_online) break;
-                    self.mx.setAutoAdvance(arena, !self.auto_advance) catch {
-                        self.mx_online = false;
-                        break;
-                    };
-                    self.auto_advance = !self.auto_advance;
+                    if (!snap.mx_online) break;
+                    self.mx.setAutoAdvance(arena, !snap.auto_advance) catch break;
+                    self.noteAutoAdvanceSet(!snap.auto_advance);
                 },
                 3 => {
                     self.page = switch (self.page) {
@@ -441,6 +496,7 @@ pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
 
     var d: Daemon = .{
         .dev = dev,
+        .io = io,
         .mx = .{ .http = &http, .base = base_url },
         .sm = soma.Client.init(io),
         .mq = .{ .io = io, .host = cfg.mqtt_host, .port = cfg.mqtt_port, .username = cfg.mqtt_user, .password = cfg.mqtt_pass },
@@ -456,6 +512,11 @@ pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
         if (d.font != null) std.debug.print("font: using {s}\n", .{path});
     }
     try deck.setBrightness(dev, d.brightness);
+
+    // State polling runs on its own thread (like the framebuffer feed) so a
+    // slow/dead matrix or soma never stalls input handling on the deck.
+    const poll_thread = try std.Thread.spawn(.{}, pollLoop, .{ io, &d });
+    poll_thread.detach();
 
     var cycle = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer cycle.deinit();
@@ -479,30 +540,39 @@ fn eventLoop(io: std.Io, dev: *hid.Device, d: *Daemon, cycle: *std.heap.ArenaAll
     const arena = cycle.allocator();
 
     _ = cycle.reset(.retain_capacity);
-    d.pollMatrix(arena);
-    d.pollSoma(arena);
-    try d.syncDisplay(arena);
-    std.debug.print("daemon running (matrix: {s} current: {s} | soma: {s} playing: {})\n", .{
-        d.mx.base, d.currentScreen(), if (d.sm_online) "online" else "offline", d.sm_playing,
-    });
+    {
+        // Give the poller's first round a moment so the first paint usually
+        // has real state — but cap it, or a dead matrix would stall startup
+        // (and the first input) just like the old in-loop polling did.
+        var waited_ms: usize = 0;
+        while (d.generation() == 0 and waited_ms < 1000) : (waited_ms += 10) {
+            std.Io.sleep(io, .fromMilliseconds(10), .awake) catch break;
+        }
+        const snap = d.snapshot();
+        try d.syncDisplay(arena, &snap);
+        std.debug.print("daemon running (matrix: {s} current: {s} | soma: {s} playing: {})\n", .{
+            d.mx.base, snap.currentScreen(), if (snap.sm_online) "online" else "offline", snap.sm_playing,
+        });
+    }
 
     var buf: [256]u8 = undefined;
-    var last_poll = std.Io.Clock.awake.now(io).toMilliseconds();
+    var seen_gen: u64 = d.generation();
     while (true) {
         defer _ = cycle.reset(.retain_capacity);
         if (try dev.pollReport(&buf, 250)) |len| {
             if (deck.parseReport(buf[0..len])) |report| {
+                const snap = d.snapshot();
                 switch (report) {
-                    .keys => |states| d.onKeys(arena, states),
-                    .dial_deltas => |deltas| d.onDialDeltas(arena, deltas),
-                    .dial_presses => |presses| d.onDialPresses(arena, presses),
+                    .keys => |states| d.onKeys(arena, &snap, states),
+                    .dial_deltas => |deltas| d.onDialDeltas(arena, &snap, deltas),
+                    .dial_presses => |presses| d.onDialPresses(arena, &snap, presses),
                     .touch_swipe => |s| {
                         const dx = @as(i32, s.to.x) - @as(i32, s.from.x);
-                        if (@abs(dx) > 60) d.jogMatrix(arena, if (dx > 0) 1 else -1);
+                        if (@abs(dx) > 60) d.jogMatrix(arena, &snap, if (dx > 0) 1 else -1);
                     },
                     else => {},
                 }
-                try d.syncDisplayChecked(arena);
+                try d.syncDisplayChecked(arena, &snap);
             }
         }
         const now = std.Io.Clock.awake.now(io).toMilliseconds();
@@ -513,19 +583,69 @@ fn eventLoop(io: std.Io, dev: *hid.Device, d: *Daemon, cycle: *std.heap.ArenaAll
             if (c != d.mirror_drawn_counter) {
                 d.mirror_drawn_counter = c;
                 d.last_mirror_ms = now;
-                d.drawStrip(arena) catch |err| switch (err) {
+                const snap = d.snapshot();
+                d.drawStrip(arena, &snap) catch |err| switch (err) {
                     error.DeviceGone => return error.DeviceGone,
                     else => {},
                 };
-                d.strip_sig = d.stripSignature();
+                d.strip_sig = d.stripSignature(&snap);
             }
         }
-        if (now - last_poll > 2000) {
-            last_poll = now;
-            d.pollMatrix(arena);
-            d.pollSoma(arena);
-            try d.syncDisplayChecked(arena);
+        // The poller thread swapped in fresh state → re-sync (draws only if
+        // what the deck shows actually changed, same as after input).
+        const gen = d.generation();
+        if (gen != seen_gen) {
+            seen_gen = gen;
+            const snap = d.snapshot();
+            try d.syncDisplayChecked(arena, &snap);
         }
+    }
+}
+
+/// Poller thread: refresh matrix/soma state every 2 s and swap it into
+/// d.state. Never touches the deck; all its network stalls (dead matrix,
+/// down soma) stay off the event loop. Owns its own HTTP client/arena so
+/// nothing here races the command clients the event loop uses.
+fn pollLoop(io: std.Io, d: *Daemon) void {
+    var http = std.http.Client{ .allocator = std.heap.page_allocator, .io = io };
+    defer http.deinit();
+    const mx: matrix.Client = .{ .http = &http, .base = d.cfg.matrix_url };
+    const sm = soma.Client.init(io);
+
+    var arena_inst = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_inst.deinit();
+
+    while (true) {
+        _ = arena_inst.reset(.retain_capacity);
+        const arena = arena_inst.allocator();
+        const gen_at_start = blk: {
+            d.state_mtx.lockUncancelable(io);
+            defer d.state_mtx.unlock(io);
+            break :blk d.cmd_gen;
+        };
+
+        var next: PollState = .{};
+        if (mx.getConfig(arena)) |cfg| {
+            next.mx_online = true;
+            Daemon.copyInto(&next.current_buf, &next.current_len, cfg.current);
+            next.auto_advance = cfg.auto_advance;
+            const names = cfg.allNames(arena) catch &.{};
+            next.screen_count = @min(names.len, max_screens);
+            for (names[0..next.screen_count], 0..) |name, i| {
+                Daemon.copyInto(&next.screen_buf[i], &next.screen_lens[i], name);
+            }
+        } else |_| {}
+        if (sm.status(arena)) |st| {
+            next.sm_online = true;
+            next.sm_playing = st.playing or st.connecting;
+            next.sm_volume = st.volume;
+            Daemon.copyInto(&next.sm_channel_buf, &next.sm_channel_len, st.channel);
+            Daemon.copyInto(&next.sm_id_buf, &next.sm_id_len, st.channel_id);
+            Daemon.copyInto(&next.sm_track_buf, &next.sm_track_len, st.track);
+        } else |_| {}
+
+        d.swapState(next, gen_at_start);
+        std.Io.sleep(io, .fromMilliseconds(2000), .awake) catch {};
     }
 }
 
