@@ -60,6 +60,9 @@ pub const Config = struct {
     mqtt_user: []const u8 = "",
     mqtt_pass: []const u8 = "",
     mqtt_keys: [8]MqttKey = default_mqtt_keys,
+    mqtt_intensity_topic: []const u8 = "",
+    mqtt_intensity_min: u8 = 0,
+    mqtt_intensity_max: u8 = 100,
 };
 
 pub const default_matrix_keys = [8]KeyAction{
@@ -118,6 +121,9 @@ const JsonConfig = struct {
     mqtt_user: ?[]const u8 = null,
     mqtt_pass: ?[]const u8 = null,
     mqtt_keys: []?JsonKey = &.{},
+    mqtt_intensity_topic: ?[]const u8 = null,
+    mqtt_intensity_min: ?u8 = null,
+    mqtt_intensity_max: ?u8 = null,
 };
 
 fn parseColor(hex: []const u8) ?[3]u8 {
@@ -160,6 +166,9 @@ pub fn load(arena: std.mem.Allocator) Config {
     if (jc.mqtt_port) |p| cfg.mqtt_port = p;
     if (jc.mqtt_user) |u| cfg.mqtt_user = u;
     if (jc.mqtt_pass) |p| cfg.mqtt_pass = p;
+    if (jc.mqtt_intensity_topic) |t| cfg.mqtt_intensity_topic = t;
+    if (jc.mqtt_intensity_min) |v| cfg.mqtt_intensity_min = v;
+    if (jc.mqtt_intensity_max) |v| cfg.mqtt_intensity_max = v;
 
     for (jc.matrix_keys, 0..) |maybe, i| {
         if (i >= 8) break;

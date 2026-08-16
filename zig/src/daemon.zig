@@ -153,6 +153,7 @@ const Daemon = struct {
     strip_sig: u64 = 0,
 
     brightness: u8 = 80,
+    mqtt_intensity: u8 = 50,
     prev_keys: [deck.key_count]bool = .{false} ** deck.key_count,
     prev_dials: [deck.dial_count]bool = .{false} ** deck.dial_count,
 
@@ -395,7 +396,13 @@ const Daemon = struct {
                 } else {
                     self.drawCenteredText(&img, "MQTT", 28, self.cfg.font_size_strip, 240, 180, 60);
                     self.drawCenteredText(&img, self.cfg.mqtt_host[0..@min(self.cfg.mqtt_host.len, 40)], 60, 16, 140, 140, 160);
-                    self.drawCenteredText(&img, snap.lastPub()[0..@min(snap.lastPub().len, 48)], 84, 16, 200, 160, 60);
+                    if (self.cfg.mqtt_intensity_topic.len > 0) {
+                        var intensity_buf: [16]u8 = undefined;
+                        const intensity_text = std.fmt.bufPrint(&intensity_buf, "Intensity: {d}%", .{self.mqtt_intensity}) catch "Intensity: --";
+                        self.drawCenteredText(&img, intensity_text, 84, 16, 200, 160, 60);
+                    } else {
+                        self.drawCenteredText(&img, snap.lastPub()[0..@min(snap.lastPub().len, 48)], 84, 16, 200, 160, 60);
+                    }
                 }
             },
         }
@@ -425,6 +432,7 @@ const Daemon = struct {
         h.update(&.{snap.sm_volume});
         h.update(if (snap.mq_online) "y" else "n");
         h.update(snap.lastPub());
+        h.update(&.{self.mqtt_intensity});
         return h.final();
     }
 
@@ -514,10 +522,19 @@ const Daemon = struct {
                 1 => self.somaCmd(arena, if (delta > 0) "surf-next" else "surf-prev"),
                 2 => self.jogMatrix(arena, snap, if (delta > 0) 1 else -1),
                 3 => {
-                    const step: i16 = @as(i16, delta) * 5;
-                    const next = std.math.clamp(@as(i16, self.brightness) + step, 0, 100);
-                    self.brightness = @intCast(next);
-                    deck.setBrightness(self.dev, self.brightness) catch {};
+                    if (self.page == .mqtt and self.cfg.mqtt_intensity_topic.len > 0) {
+                        const step: i16 = @as(i16, delta) * 5;
+                        const next = std.math.clamp(@as(i16, self.mqtt_intensity) + step, @as(i16, self.cfg.mqtt_intensity_min), @as(i16, self.cfg.mqtt_intensity_max));
+                        self.mqtt_intensity = @intCast(next);
+                        var buf: [8]u8 = undefined;
+                        const payload = std.fmt.bufPrint(&buf, "{d}", .{self.mqtt_intensity}) catch continue;
+                        self.enqueuePublish(self.cfg.mqtt_intensity_topic, payload);
+                    } else {
+                        const step: i16 = @as(i16, delta) * 5;
+                        const next = std.math.clamp(@as(i16, self.brightness) + step, 0, 100);
+                        self.brightness = @intCast(next);
+                        deck.setBrightness(self.dev, self.brightness) catch {};
+                    }
                 },
                 else => unreachable,
             }
