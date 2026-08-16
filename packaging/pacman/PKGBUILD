@@ -1,0 +1,56 @@
+# Maintainer: Paul Daniel <paulgdan@gmail.com>
+#
+# Builds straight out of this git checkout — there's no separate source
+# tarball. This file lives at packaging/pacman/PKGBUILD, two levels under
+# the repo root, and _repo_root() below walks back up to it. To deploy to
+# another Arch box: get a clone of deckd-zig onto it (git clone/pull, or
+# rsync), then from this directory run:
+#
+#   makepkg -si
+#
+# TODO: set url= to a real remote once this repo has one, and pick a
+# license (no LICENSE file exists in the repo yet, so license= is a stub).
+
+pkgname=deckd
+pkgver=r15.6fc1b0c
+pkgrel=1
+pkgdesc="Elgato Stream Deck Plus daemon for matrix_sim, soma-zig, and MQTT — raw hidraw, no vendor SDK"
+arch=('x86_64' 'aarch64')
+url="https://github.com/local/deckd-zig"
+license=('custom')
+depends=('glibc')
+makedepends=('zig' 'git')
+optdepends=('ttf-jetbrains-mono-nerd: default config.zig font_path uses its glyphs')
+backup=()
+source=()
+sha256sums=()
+
+_repo_root() {
+  git -C "$startdir" rev-parse --show-toplevel
+}
+
+pkgver() {
+  cd "$(_repo_root)"
+  printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$(_repo_root)/zig"
+  # build.zig defaults -Dcpu to native, which would tie the binary to
+  # whichever machine runs makepkg. Pin to a portable baseline so the
+  # resulting deckd-*.pkg.tar.zst also runs on other servers' CPUs, not
+  # just this one — relevant if you scp the built package instead of
+  # rebuilding on each box.
+  zig build -Doptimize=ReleaseFast -Dcpu=baseline --prefix "$srcdir/install"
+}
+
+package() {
+  local repo
+  repo="$(_repo_root)"
+
+  install -Dm755 "$srcdir/install/bin/deckd" "$pkgdir/usr/bin/deckd"
+  install -Dm644 "$repo/systemd/deckd.service" "$pkgdir/usr/lib/systemd/user/deckd.service"
+  install -Dm644 "$repo/packaging/udev/71-streamdeck.rules" \
+    "$pkgdir/usr/lib/udev/rules.d/71-streamdeck.rules"
+  install -Dm644 "$repo/README.md" "$pkgdir/usr/share/doc/deckd/README.md"
+}

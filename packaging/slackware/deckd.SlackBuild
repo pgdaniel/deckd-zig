@@ -1,0 +1,82 @@
+#!/bin/sh
+#
+# Slackware build script for deckd — builds straight out of this git
+# checkout (this file lives at packaging/slackware/, two levels under the
+# repo root). To deploy to another Slackware box: get a clone of deckd-zig
+# onto it, install zig (see SlackBuilds.org, "development/zig"; pinned
+# version is in ../../.tool-versions), then as root:
+#
+#   ./deckd.SlackBuild
+#   installpkg /tmp/deckd-*.txz
+#
+# deckd itself runs unprivileged — see rc.deckd.new for how it's meant to
+# be supervised, and packaging/udev/71-streamdeck.rules for hidraw access.
+
+set -e
+
+PRGNAM=deckd
+BUILD=${BUILD:-1}
+TAG=${TAG:-_deckdzig}
+
+CWD=$(cd "$(dirname "$0")" && pwd)
+REPO_ROOT=$(cd "$CWD/../.." && pwd)
+VERSION=${VERSION:-$(cd "$REPO_ROOT" && git rev-parse --short HEAD)}
+
+if [ -z "$ARCH" ]; then
+    case "$(uname -m)" in
+        i?86) ARCH=i586 ;;
+        arm*) ARCH=arm ;;
+        *) ARCH=$(uname -m) ;;
+    esac
+fi
+
+TMP=${TMP:-/tmp/SBo}
+PKG=$TMP/package-$PRGNAM
+OUTPUT=${OUTPUT:-/tmp}
+
+rm -rf "$PKG"
+mkdir -p "$PKG" "$OUTPUT"
+
+# Build straight from the repo checkout; install into a scratch prefix so
+# nothing lands in the source tree.
+cd "$REPO_ROOT/zig"
+# -Dcpu=baseline: build.zig defaults to -Dcpu=native, which would tie the
+# binary to this build host's CPU. Pin to a portable baseline so the .txz
+# also runs on other servers, not just this one.
+zig build -Doptimize=ReleaseFast -Dcpu=baseline --prefix "$TMP/$PRGNAM-install"
+
+mkdir -p "$PKG/usr/bin"
+install -m0755 "$TMP/$PRGNAM-install/bin/deckd" "$PKG/usr/bin/deckd"
+
+mkdir -p "$PKG/lib/udev/rules.d"
+install -m0644 "$REPO_ROOT/packaging/udev/71-streamdeck.rules" \
+    "$PKG/lib/udev/rules.d/71-streamdeck.rules"
+
+mkdir -p "$PKG/etc/rc.d"
+install -m0755 "$CWD/rc.deckd.new" "$PKG/etc/rc.d/rc.deckd.new"
+
+mkdir -p "$PKG/usr/doc/$PRGNAM-$VERSION"
+cp "$REPO_ROOT/README.md" "$PKG/usr/doc/$PRGNAM-$VERSION/"
+cp "$REPO_ROOT/systemd/deckd.service" "$PKG/usr/doc/$PRGNAM-$VERSION/deckd.service.example"
+cat > "$PKG/usr/doc/$PRGNAM-$VERSION/README.SLACKWARE" <<EOF
+deckd runs as an unprivileged user, not root.
+
+1. Add that user to the 'input' group (matches the packaged udev rule):
+     usermod -aG input <user>
+2. Set DECKD_USER in /etc/default/deckd, e.g.:
+     echo 'DECKD_USER=<user>' > /etc/default/deckd
+3. Enable the init script:
+     mv /etc/rc.d/rc.deckd.new /etc/rc.d/rc.deckd
+     chmod +x /etc/rc.d/rc.deckd
+     /etc/rc.d/rc.deckd start
+4. Configure at ~<user>/.config/deckd/config.json — see README.md.
+
+If this box runs systemd instead of sysvinit, use
+deckd.service.example (a user unit) rather than rc.deckd.
+EOF
+
+mkdir -p "$PKG/install"
+cat "$CWD/slack-desc" > "$PKG/install/slack-desc"
+
+cd "$PKG"
+/sbin/makepkg -l y -c n "$OUTPUT/$PRGNAM-$VERSION-$ARCH-$BUILD$TAG.txz"

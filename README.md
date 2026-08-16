@@ -111,6 +111,11 @@ boot before login: `sudo loginctl enable-linger $USER`.
 processes share the hidraw node and fight over the deck
 (`pm2 stop deckd` before `systemctl --user start deckd`, and vice versa).
 
+## Deploying to other servers
+
+`packaging/` has a PKGBUILD (Arch) and a SlackBuild (Slackware), both
+building straight from a git checkout — see `packaging/README.md`.
+
 ## Controls
 
 **Knob 4 push cycles pages: MATRIX → SOMA → MIRROR → MQTT.** Knob roles are fixed
@@ -227,6 +232,7 @@ the image into noise lines). 800×100 JPEG, no rotation needed.
 | `zig/src/daemon.zig` | pages, knob wiring, strip layouts, main loop |
 | `zig/src/main.zig` | CLI (`run` + dev commands) |
 | `systemd/deckd.service` | user service for running at login |
+| `packaging/` | PKGBUILD (Arch) and SlackBuild (Slackware) for deploying to other servers |
 
 ## Backlog
 

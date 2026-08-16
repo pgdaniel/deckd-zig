@@ -1,0 +1,62 @@
+#!/bin/sh
+# /etc/rc.d/rc.deckd — start/stop the deckd Stream Deck daemon.
+#
+# Ships as rc.deckd.new so it never clobbers a local copy on upgrade — the
+# Slackware convention. Enable it with:
+#   mv /etc/rc.d/rc.deckd.new /etc/rc.d/rc.deckd
+#   chmod +x /etc/rc.d/rc.deckd
+#
+# deckd is meant to run as your normal (non-root) user — it needs rw on the
+# Stream Deck's hidraw node, which the packaged udev rule grants to the
+# `input` group (see packaging/udev/71-streamdeck.rules) or which logind's
+# uaccess tag covers if this is a desktop session. Set DECKD_USER below, or
+# in /etc/default/deckd, before starting.
+
+DECKD_USER=${DECKD_USER:-}
+DECKD_BIN=/usr/bin/deckd
+DECKD_LOG=/var/log/deckd.log
+PIDFILE=/var/run/deckd.pid
+
+[ -r /etc/default/deckd ] && . /etc/default/deckd
+
+deckd_start() {
+    if [ -z "$DECKD_USER" ]; then
+        echo "rc.deckd: set DECKD_USER (in /etc/default/deckd) before starting"
+        exit 1
+    fi
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "deckd is already running (pid $(cat "$PIDFILE"))"
+        return 0
+    fi
+    echo "Starting deckd as $DECKD_USER"
+    su -s /bin/sh -c "exec '$DECKD_BIN' run >>'$DECKD_LOG' 2>&1 & echo \$! > '$PIDFILE'" "$DECKD_USER"
+}
+
+deckd_stop() {
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null
+        rm -f "$PIDFILE"
+    fi
+}
+
+deckd_restart() {
+    deckd_stop
+    sleep 1
+    deckd_start
+}
+
+deckd_status() {
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "deckd is running (pid $(cat "$PIDFILE"))"
+    else
+        echo "deckd is not running"
+    fi
+}
+
+case "$1" in
+    start)   deckd_start ;;
+    stop)    deckd_stop ;;
+    restart) deckd_restart ;;
+    status)  deckd_status ;;
+    *)       echo "usage: $0 {start|stop|restart|status}" ;;
+esac

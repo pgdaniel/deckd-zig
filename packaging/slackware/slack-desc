@@ -1,0 +1,19 @@
+# HOW TO EDIT THIS FILE:
+# The "handy ruler" below makes it easy to edit a package description.
+# Line up the first '|' above the ':' following the base package name, and
+# the '|' on the right side marks the last column you can put a character
+# in. You must make exactly 11 lines for the formatting to be correct. It's
+# also customary to leave one space after the ':'.
+
+        |-----handy-ruler------------------------------------------------|
+deckd: deckd (Elgato Stream Deck Plus daemon)
+deckd:
+deckd: deckd drives an Elgato Stream Deck Plus over raw hidraw (no vendor
+deckd: SDK) and turns it into a controller for matrix_sim (a HUB75 LED
+deckd: panel), soma-zig (a SomaFM terminal player), and a publish-only
+deckd: MQTT page for lights/home-automation. Written from scratch in Zig.
+deckd:
+deckd: Homepage: https://github.com/local/deckd-zig
+deckd:
+deckd:
+deckd:
