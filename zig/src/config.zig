@@ -11,12 +11,13 @@
 //!   "mqtt_keys":   [ {"label": "LT ON",   "topic": "home/lights/set", "payload": "ON", "color": "ffc850"}, ... ]
 //! }
 //!
-//! Key lists patch the default maps by index (8 entries max); an entry may
-//! set just the fields it wants to change. Soma keys also accept the special
-//! ids "viz" and "stop". MQTT keys publish payload to topic on press; an
-//! empty topic disables the key. mqtt_host must be a literal IP (or
+//! Key lists patch the default maps by index (up to the device's key count);
+//! an entry may set just the fields it wants to change. Soma keys also accept
+//! the special ids "viz" and "stop". MQTT keys publish payload to topic on
+//! press; an empty topic disables the key. mqtt_host must be a literal IP (or
 //! "localhost") — no DNS.
 const std = @import("std");
+const deck = @import("deck.zig");
 
 pub const KeyAction = struct {
     label: []const u8,
@@ -46,26 +47,22 @@ pub const MqttKey = struct {
 pub const Config = struct {
     matrix_url: []const u8 = "http://localhost:8787",
     brightness: u8 = 80,
-    /// .ttf to render key/strip text with (e.g. any Nerd Font — PUA icon
-    /// codepoints in labels work, labels are UTF-8). null → built-in 8x8
-    /// bitmap font.
     font_path: ?[]const u8 = null,
-    font_size_key: u16 = 22, // px em height on the 120x120 keys
-    font_size_strip: u16 = 30, // px em height for the strip's main line
-    matrix_keys: [8]KeyAction = default_matrix_keys,
-    soma_keys: [8]SomaKey = default_soma_keys,
-    // MQTT page: empty host hides nothing but shows "MQTT NOT CONFIGURED".
+    font_size_key: u16 = 22,
+    font_size_strip: u16 = 30,
+    matrix_keys: [deck.max_keys]KeyAction = undefined,
+    soma_keys: [deck.max_keys]SomaKey = undefined,
     mqtt_host: []const u8 = "",
     mqtt_port: u16 = 1883,
     mqtt_user: []const u8 = "",
     mqtt_pass: []const u8 = "",
-    mqtt_keys: [8]MqttKey = default_mqtt_keys,
+    mqtt_keys: [deck.max_keys]MqttKey = undefined,
     mqtt_intensity_topic: []const u8 = "",
     mqtt_intensity_min: u8 = 0,
     mqtt_intensity_max: u8 = 100,
 };
 
-pub const default_matrix_keys = [8]KeyAction{
+pub const default_matrix_keys_plus = [8]KeyAction{
     .{ .label = "WEATHER", .screen = "weather-cyberpunk", .r = 255, .g = 140, .b = 0 },
     .{ .label = "HIGH", .screen = "high-temp-cyberpunk", .r = 255, .g = 220, .b = 0 },
     .{ .label = "CLOCK", .screen = "clock-cyberpunk", .r = 0, .g = 220, .b = 255 },
@@ -76,7 +73,16 @@ pub const default_matrix_keys = [8]KeyAction{
     .{ .label = "MSG", .screen = "message", .r = 220, .g = 220, .b = 220 },
 };
 
-pub const default_soma_keys = [8]SomaKey{
+pub const default_matrix_keys_mini = [6]KeyAction{
+    .{ .label = "WEATHER", .screen = "weather-cyberpunk", .r = 255, .g = 140, .b = 0 },
+    .{ .label = "HIGH", .screen = "high-temp-cyberpunk", .r = 255, .g = 220, .b = 0 },
+    .{ .label = "CLOCK", .screen = "clock-cyberpunk", .r = 0, .g = 220, .b = 255 },
+    .{ .label = "AQI", .screen = "aqi-cyberpunk", .r = 0, .g = 220, .b = 100 },
+    .{ .label = "HUMID", .screen = "humidity-cyberpunk", .r = 60, .g = 120, .b = 255 },
+    .{ .label = "SPECTR", .screen = "spectrum", .r = 255, .g = 0, .b = 220 },
+};
+
+pub const default_soma_keys_plus = [8]SomaKey{
     .{ .label = "GROOVE", .id = "groovesalad", .r = 120, .g = 220, .b = 120 },
     .{ .label = "DRONE", .id = "dronezone", .r = 100, .g = 160, .b = 255 },
     .{ .label = "DEFCON", .id = "defcon", .r = 255, .g = 80, .b = 80 },
@@ -87,12 +93,29 @@ pub const default_soma_keys = [8]SomaKey{
     .{ .label = "STOP", .id = "stop", .r = 255, .g = 60, .b = 60 },
 };
 
-// Placeholders — point these at your own topics. Empty topic = inert key.
-pub const default_mqtt_keys = [8]MqttKey{
+pub const default_soma_keys_mini = [6]SomaKey{
+    .{ .label = "GROOVE", .id = "groovesalad", .r = 120, .g = 220, .b = 120 },
+    .{ .label = "DRONE", .id = "dronezone", .r = 100, .g = 160, .b = 255 },
+    .{ .label = "DEFCON", .id = "defcon", .r = 255, .g = 80, .b = 80 },
+    .{ .label = "AGENT", .id = "secretagent", .r = 220, .g = 180, .b = 255 },
+    .{ .label = "LUSH", .id = "lush", .r = 255, .g = 160, .b = 200 },
+    .{ .label = "DEEP", .id = "deepspaceone", .r = 140, .g = 240, .b = 240 },
+};
+
+pub const default_mqtt_keys_plus = [8]MqttKey{
     .{ .label = "LT ON", .topic = "home/lights/set", .payload = "ON", .r = 255, .g = 200, .b = 80 },
     .{ .label = "LT OFF", .topic = "home/lights/set", .payload = "OFF", .r = 130, .g = 100, .b = 40 },
     .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
     .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
+    .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
+    .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
+    .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
+    .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
+};
+
+pub const default_mqtt_keys_mini = [6]MqttKey{
+    .{ .label = "LT ON", .topic = "home/lights/set", .payload = "ON", .r = 255, .g = 200, .b = 80 },
+    .{ .label = "LT OFF", .topic = "home/lights/set", .payload = "OFF", .r = 130, .g = 100, .b = 40 },
     .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
     .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
     .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 },
@@ -135,10 +158,28 @@ fn parseColor(hex: []const u8) ?[3]u8 {
     };
 }
 
-/// Load config from ~/.config/deckd/config.json, merged over the defaults.
-/// The arena must live for the whole process (parsed strings point into it).
-pub fn load(arena: std.mem.Allocator) Config {
+/// Load config from ~/.config/deckd/config.json, merged over the defaults
+/// for the given device model. The arena must live for the whole process
+/// (parsed strings point into it).
+pub fn load(arena: std.mem.Allocator, model: deck.Model) Config {
     var cfg: Config = .{};
+
+    const kc = deck.keyCount(model);
+    switch (model) {
+        .plus => {
+            cfg.matrix_keys = default_matrix_keys_plus;
+            cfg.soma_keys = default_soma_keys_plus;
+            cfg.mqtt_keys = default_mqtt_keys_plus;
+        },
+        .mini => {
+            cfg.matrix_keys = undefined;
+            cfg.soma_keys = undefined;
+            cfg.mqtt_keys = undefined;
+            for (&cfg.matrix_keys, 0..) |*k, i| k.* = if (i < 6) default_matrix_keys_mini[i] else .{ .label = "", .screen = "", .r = 0, .g = 0, .b = 0 };
+            for (&cfg.soma_keys, 0..) |*k, i| k.* = if (i < 6) default_soma_keys_mini[i] else .{ .label = "", .id = "", .r = 0, .g = 0, .b = 0 };
+            for (&cfg.mqtt_keys, 0..) |*k, i| k.* = if (i < 6) default_mqtt_keys_mini[i] else .{ .label = "", .topic = "", .payload = "", .r = 0, .g = 0, .b = 0 };
+        },
+    }
 
     const home = std.c.getenv("HOME") orelse return cfg;
     const path = std.fmt.allocPrint(arena, "{s}/.config/deckd/config.json", .{std.mem.sliceTo(home, 0)}) catch return cfg;
@@ -171,7 +212,7 @@ pub fn load(arena: std.mem.Allocator) Config {
     if (jc.mqtt_intensity_max) |v| cfg.mqtt_intensity_max = v;
 
     for (jc.matrix_keys, 0..) |maybe, i| {
-        if (i >= 8) break;
+        if (i >= kc) break;
         const jk = maybe orelse continue;
         if (jk.label) |v| cfg.matrix_keys[i].label = v;
         if (jk.screen) |v| cfg.matrix_keys[i].screen = v;
@@ -184,7 +225,7 @@ pub fn load(arena: std.mem.Allocator) Config {
         }
     }
     for (jc.soma_keys, 0..) |maybe, i| {
-        if (i >= 8) break;
+        if (i >= kc) break;
         const jk = maybe orelse continue;
         if (jk.label) |v| cfg.soma_keys[i].label = v;
         if (jk.id) |v| cfg.soma_keys[i].id = v;
@@ -197,7 +238,7 @@ pub fn load(arena: std.mem.Allocator) Config {
         }
     }
     for (jc.mqtt_keys, 0..) |maybe, i| {
-        if (i >= 8) break;
+        if (i >= kc) break;
         const jk = maybe orelse continue;
         if (jk.label) |v| cfg.mqtt_keys[i].label = v;
         if (jk.topic) |v| cfg.mqtt_keys[i].topic = v;

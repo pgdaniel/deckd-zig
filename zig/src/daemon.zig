@@ -1,20 +1,25 @@
-//! The deckd daemon: Stream Deck Plus → matrix control API + soma player IPC
+//! The deckd daemon: Stream Deck → matrix control API + soma player IPC
 //! + MQTT broker.
 //!
-//! Pages (knob 4 push cycles them) swap what the 8 keys and the strip show:
-//!   MATRIX — keys direct-select matrix screens (white border = active),
-//!            strip shows screen name / auto-advance / soma now-playing.
-//!   SOMA   — keys are SomaFM channel presets + VIZ + STOP (border = playing),
-//!            strip shows channel / track / volume.
-//!   MQTT   — keys publish their configured topic/payload to the broker,
-//!            strip shows the broker and the last thing published.
+//! On the Plus (8 keys + strip + 4 dials):
+//!   Pages (knob 4 push cycles them) swap what the 8 keys and the strip show:
+//!     MATRIX — keys direct-select matrix screens (white border = active),
+//!              strip shows screen name / auto-advance / soma now-playing.
+//!     SOMA   — keys are SomaFM channel presets + VIZ + STOP (border = playing),
+//!              strip shows channel / track / volume.
+//!     MQTT   — keys publish their configured topic/payload to the broker,
+//!              strip shows the broker and the last thing published.
+//!     MIRROR — strip shows live matrix framebuffer; keys behave like MATRIX.
+//!   Knobs (fixed roles on all pages):
+//!     knob 1 rotate: soma volume        push: mute toggle
+//!     knob 2 rotate: soma channel surf  push: play/stop toggle
+//!     knob 3 rotate: matrix screen jog  push: auto-advance toggle
+//!     knob 4 rotate: deck LCD brightness  push: switch page
+//!   Strip left/right swipe jogs matrix screens too.
 //!
-//! Knobs (fixed roles on all pages):
-//!   knob 1 rotate: soma volume        push: mute toggle
-//!   knob 2 rotate: soma channel surf  push: play/stop toggle
-//!   knob 3 rotate: matrix screen jog  push: auto-advance toggle
-//!   knob 4 rotate: deck LCD brightness  push: switch page
-//! Strip left/right swipe jogs matrix screens too.
+//! On the Mini (6 keys, no strip, no dials):
+//!   Only the MATRIX page is active (no page cycling, no strip, no dials).
+//!   Keys direct-select matrix screens.
 //!
 //! Threading: a poller thread refreshes matrix/soma state every 2 s and
 //! swaps it in wholesale (see PollState); the event loop never blocks on
@@ -46,17 +51,11 @@ const max_screens = 16;
 const name_len = 64;
 const track_len = 128;
 
-/// Matrix/soma state, refreshed by the poller thread every 2 s and swapped
-/// in under Daemon.state_mtx. The event loop works on snapshots (see
-/// Daemon.snapshot), so it always reads a consistent view and never blocks
-/// on the network.
 const PollState = struct {
     mx_online: bool = false,
     auto_advance: bool = false,
     current_buf: [name_len]u8 = undefined,
     current_len: usize = 0,
-    // Jog list: all screens in panel order (the deck can reach disabled
-    // screens too — "enabled" only governs the auto-advance rotation).
     screen_buf: [max_screens][name_len]u8 = undefined,
     screen_lens: [max_screens]usize = .{0} ** max_screens,
     screen_count: usize = 0,
@@ -71,9 +70,6 @@ const PollState = struct {
     sm_track_buf: [track_len]u8 = undefined,
     sm_track_len: usize = 0,
 
-    // Publisher-thread-owned (pubLoop) — carried across swaps, NOT
-    // refreshed by polling. "online" just means the last publish worked —
-    // optimistic until one fails.
     mq_online: bool = true,
     last_pub_buf: [128]u8 = undefined,
     last_pub_len: usize = 0,
@@ -99,8 +95,6 @@ const PollState = struct {
     }
 };
 
-/// One queued MQTT publish. Fixed-size so the queue never allocates;
-/// oversized topics/payloads are rejected at enqueue time.
 const PubItem = struct {
     topic_buf: [128]u8 = undefined,
     topic_len: usize = 0,
@@ -118,6 +112,7 @@ const PubItem = struct {
 
 const Daemon = struct {
     dev: *hid.Device,
+    model: deck.Model,
     io: std.Io,
     mx: matrix.Client,
     sm: soma.Client,
@@ -130,35 +125,24 @@ const Daemon = struct {
     mirror_drawn_counter: u64 = 0,
     last_mirror_ms: i64 = 0,
 
-    // Polled matrix/soma state (see PollState). state_gen is bumped on
-    // every swap/write-back so the event loop knows to re-sync the display;
-    // cmd_gen guards against the poller clobbering a just-issued command
-    // with state that predates it. state_mtx also guards the publish queue
-    // below — one lock, always tiny memcpy critical sections.
     state: PollState = .{},
     state_mtx: std.Io.Mutex = .init,
     state_gen: u64 = 0,
     cmd_gen: u64 = 0,
 
-    // MQTT publish queue: event loop enqueues, pubLoop drains. Ring buffer;
-    // when full, new presses are dropped (freshest intent is what matters,
-    // and a full queue means the broker is down anyway).
     pub_queue: [16]PubItem = undefined,
-    pub_head: usize = 0, // next write
-    pub_tail: usize = 0, // next read
+    pub_head: usize = 0,
+    pub_tail: usize = 0,
     pub_dropped: u64 = 0,
 
-    // what's currently on the deck (redraw when the signature changes)
     keys_sig: u64 = 0,
     strip_sig: u64 = 0,
 
     brightness: u8 = 80,
     mqtt_intensity: u8 = 50,
-    prev_keys: [deck.key_count]bool = .{false} ** deck.key_count,
-    prev_dials: [deck.dial_count]bool = .{false} ** deck.dial_count,
+    prev_keys: [deck.max_keys]bool = .{false} ** deck.max_keys,
+    prev_dials: [deck.max_dials]bool = .{false} ** deck.max_dials,
 
-    /// Consistent copy of the latest polled state. ~2 KB stack copy, lock
-    /// held only for the memcpy.
     fn snapshot(self: *Daemon) PollState {
         self.state_mtx.lockUncancelable(self.io);
         defer self.state_mtx.unlock(self.io);
@@ -171,11 +155,6 @@ const Daemon = struct {
         return self.state_gen;
     }
 
-    /// Poller thread: swap in freshly-polled state — unless a command was
-    /// written back while we were polling (this round's data predates the
-    /// command, so dropping it avoids visibly reverting the deck; the next
-    /// round, ≤2 s out, converges). The mqtt fields are the publisher
-    /// thread's business and are carried across untouched.
     fn swapState(self: *Daemon, next_in: PollState, gen_at_start: u64) void {
         self.state_mtx.lockUncancelable(self.io);
         defer self.state_mtx.unlock(self.io);
@@ -188,8 +167,6 @@ const Daemon = struct {
         self.state_gen +%= 1;
     }
 
-    /// Event loop, after a successful matrix command: reflect it at once
-    /// instead of waiting for the poller's next round.
     fn noteScreenSet(self: *Daemon, name: []const u8) void {
         self.state_mtx.lockUncancelable(self.io);
         defer self.state_mtx.unlock(self.io);
@@ -206,8 +183,6 @@ const Daemon = struct {
         self.state_gen +%= 1;
     }
 
-    /// Event loop, after a soma command: quick status refresh written back
-    /// under the same protocol. null = soma unreachable.
     fn noteSomaStatus(self: *Daemon, st: ?soma.Status) void {
         self.state_mtx.lockUncancelable(self.io);
         defer self.state_mtx.unlock(self.io);
@@ -226,9 +201,6 @@ const Daemon = struct {
         self.state_gen +%= 1;
     }
 
-    /// Event loop: queue a publish for pubLoop. Never blocks on the
-    /// network — the worst case is a full queue (broker down), in which
-    /// case the press is dropped and logged.
     fn enqueuePublish(self: *Daemon, topic: []const u8, payload: []const u8) void {
         if (topic.len == 0 or topic.len > 128 or payload.len > 256) {
             std.debug.print("mqtt: topic/payload too long, dropped\n", .{});
@@ -250,7 +222,6 @@ const Daemon = struct {
         self.pub_head = next;
     }
 
-    /// pubLoop: take the oldest queued publish, or null when empty.
     fn dequeuePublish(self: *Daemon) ?PubItem {
         self.state_mtx.lockUncancelable(self.io);
         defer self.state_mtx.unlock(self.io);
@@ -260,7 +231,6 @@ const Daemon = struct {
         return item;
     }
 
-    /// pubLoop: record the outcome of a publish for the strip.
     fn notePublished(self: *Daemon, ok: bool, line: []const u8) void {
         self.state_mtx.lockUncancelable(self.io);
         defer self.state_mtx.unlock(self.io);
@@ -275,17 +245,11 @@ const Daemon = struct {
         len.* = n;
     }
 
-    // ----------------------------------------------------------
-    // State polling happens on the poller thread (see pollLoop).
-    // ----------------------------------------------------------
     fn somaCmd(self: *Daemon, arena: std.mem.Allocator, cmd: []const u8) void {
         _ = self.sm.command(arena, cmd) catch {
             self.noteSomaStatus(null);
             return;
         };
-        // The command is applied on soma's next frame (~40ms); give it a
-        // moment, then refresh so the strip reflects the change at once.
-        // Local socket, so this stays quick even when the matrix is down.
         std.Io.sleep(self.sm.io, .fromMilliseconds(60), .awake) catch {};
         const st = self.sm.status(arena) catch {
             self.noteSomaStatus(null);
@@ -294,43 +258,38 @@ const Daemon = struct {
         self.noteSomaStatus(st);
     }
 
-    // ----------------------------------------------------------
-    // Drawing
-    // ----------------------------------------------------------
     fn activeKeyName(self: *const Daemon, snap: *const PollState) []const u8 {
         return switch (self.page) {
             .matrix, .mirror => if (snap.mx_online) snap.currentScreen() else "",
             .soma => if (snap.sm_online and snap.sm_playing) snap.somaId() else "",
-            .mqtt => "", // publish-only: no per-key state to highlight
+            .mqtt => "",
         };
     }
 
     fn drawKeys(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState) !void {
+        const kc = deck.keyCount(self.model);
         switch (self.page) {
-            .matrix, .mirror => for (self.cfg.matrix_keys, 0..) |ka, i| {
+            .matrix, .mirror => for (self.cfg.matrix_keys[0..kc], 0..) |ka, i| {
                 try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.screen, self.activeKeyName(snap)));
             },
-            .soma => for (self.cfg.soma_keys, 0..) |ka, i| {
+            .soma => for (self.cfg.soma_keys[0..kc], 0..) |ka, i| {
                 try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.id, self.activeKeyName(snap)));
             },
-            .mqtt => for (self.cfg.mqtt_keys, 0..) |ka, i| {
+            .mqtt => for (self.cfg.mqtt_keys[0..kc], 0..) |ka, i| {
                 try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, false);
             },
         }
     }
 
     fn drawKey(self: *Daemon, arena: std.mem.Allocator, key: u8, label: []const u8, r: u8, g: u8, b: u8, active: bool) !void {
-        var img = try image.Image.init(arena, deck.key_px, deck.key_px);
+        const kpx = deck.keyPx(self.model);
+        var img = try image.Image.init(arena, kpx, kpx);
         img.fill(r / 6, g / 6, b / 6);
-        self.drawCenteredText(&img, label, deck.key_px / 2, self.cfg.font_size_key, r, g, b);
+        self.drawCenteredText(&img, label, kpx / 2, self.cfg.font_size_key, r, g, b);
         if (active) render.border(&img, 4, 255, 255, 255);
-        var jpeg: std.ArrayList(u8) = .empty;
-        try image.encodeJpeg(&img, 90, &jpeg, arena);
-        try deck.setKeyImage(self.dev, key, jpeg.items);
+        try deck.setKeyImage(self.model, self.dev, key, &img);
     }
 
-    /// Text centered at (img.w/2, cy): TTF when configured, else the 8x8
-    /// bitmap font at a scale matched to the requested px size.
     fn drawCenteredText(self: *Daemon, img: *image.Image, text: []const u8, cy: usize, px: u16, r: u8, g: u8, b: u8) void {
         if (self.font) |*f| {
             f.drawCentered(img, text, img.w / 2, cy, px, r, g, b);
@@ -341,7 +300,10 @@ const Daemon = struct {
     }
 
     fn drawStrip(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState) !void {
-        var img = try image.Image.init(arena, deck.strip_w, deck.strip_h);
+        if (!deck.hasStrip(self.model)) return;
+        const sw = deck.stripW(self.model);
+        const sh = deck.stripH(self.model);
+        var img = try image.Image.init(arena, sw, sh);
         img.fill(8, 8, 12);
         switch (self.page) {
             .matrix => {
@@ -373,10 +335,9 @@ const Daemon = struct {
                 var fw: usize = 0;
                 var fh: usize = 0;
                 if (self.feed.latest(&fbuf, &fw, &fh)) {
-                    // Largest integer scale that fits the strip, centered.
-                    const scale = @max(1, @min(deck.strip_w / fw, deck.strip_h / fh));
-                    const ox = (deck.strip_w - fw * scale) / 2;
-                    const oy = (deck.strip_h - fh * scale) / 2;
+                    const scale = @max(1, @min(sw / fw, sh / fh));
+                    const ox = (sw - fw * scale) / 2;
+                    const oy = (sh - fh * scale) / 2;
                     for (0..fh) |y| {
                         for (0..fw) |x| {
                             const si = (y * fw + x) * 3;
@@ -408,12 +369,11 @@ const Daemon = struct {
         }
         var jpeg: std.ArrayList(u8) = .empty;
         try image.encodeJpeg(&img, 90, &jpeg, arena);
-        try deck.setStripImage(self.dev, 0, 0, deck.strip_w, deck.strip_h, jpeg.items);
+        try deck.setStripImage(self.dev, 0, 0, sw, sh, jpeg.items);
     }
 
     fn keysSignature(self: *const Daemon, snap: *const PollState) u64 {
         var h = std.hash.Wyhash.init(1);
-        // Mirror page shows the same keys as the matrix page.
         h.update(if (self.page == .soma) "soma" else if (self.page == .mqtt) "mqtt" else "matrix");
         h.update(self.activeKeyName(snap));
         return h.final();
@@ -438,20 +398,19 @@ const Daemon = struct {
 
     fn syncDisplay(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState) !void {
         const ks = self.keysSignature(snap);
-        const ss = self.stripSignature(snap);
         if (ks != self.keys_sig) {
             try self.drawKeys(arena, snap);
             self.keys_sig = ks;
         }
-        if (ss != self.strip_sig) {
-            try self.drawStrip(arena, snap);
-            self.strip_sig = ss;
+        if (deck.hasStrip(self.model)) {
+            const ss = self.stripSignature(snap);
+            if (ss != self.strip_sig) {
+                try self.drawStrip(arena, snap);
+                self.strip_sig = ss;
+            }
         }
     }
 
-    /// Like syncDisplay, but a dead device propagates so the event loop
-    /// can hand off to the reconnect logic instead of spinning on a
-    /// corpse fd.
     fn syncDisplayChecked(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState) error{DeviceGone}!void {
         self.syncDisplay(arena, snap) catch |err| switch (err) {
             error.DeviceGone => return error.DeviceGone,
@@ -459,9 +418,6 @@ const Daemon = struct {
         };
     }
 
-    // ----------------------------------------------------------
-    // Actions
-    // ----------------------------------------------------------
     fn jogMatrix(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState, dir: i8) void {
         if (!snap.mx_online or snap.screen_count == 0) return;
         var pos: usize = 0;
@@ -472,19 +428,17 @@ const Daemon = struct {
         const n = snap.screen_count;
         const next = if (dir >= 0) (pos + 1) % n else (pos + n - 1) % n;
         const name = snap.screen_buf[next][0..snap.screen_lens[next]];
-        self.mx.showScreen(arena, name) catch return; // poller marks it offline
+        self.mx.showScreen(arena, name) catch return;
         self.noteScreenSet(name);
     }
 
-    fn onKeys(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState, states: [deck.key_count]bool) void {
-        for (states, 0..) |pressed, i| {
+    fn onKeys(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState, states: [deck.max_keys]bool) void {
+        const kc = deck.keyCount(self.model);
+        for (states[0..kc], 0..) |pressed, i| {
             if (!pressed or self.prev_keys[i]) continue;
             switch (self.page) {
                 .matrix, .mirror => {
                     const ka = self.cfg.matrix_keys[i];
-                    // Skip the (blocking) HTTP call entirely when the latest
-                    // snapshot already says the matrix is down — the poller
-                    // will flip it back when it's reachable again.
                     if (!snap.mx_online) continue;
                     std.debug.print("key {d} → matrix {s}\n", .{ i, ka.screen });
                     self.mx.showScreen(arena, ka.screen) catch continue;
@@ -514,8 +468,9 @@ const Daemon = struct {
         self.prev_keys = states;
     }
 
-    fn onDialDeltas(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState, deltas: [deck.dial_count]i8) void {
-        for (deltas, 0..) |delta, i| {
+    fn onDialDeltas(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState, deltas: [deck.max_dials]i8) void {
+        const dc = deck.dialCount(self.model);
+        for (deltas[0..dc], 0..) |delta, i| {
             if (delta == 0) continue;
             switch (i) {
                 0 => self.somaCmd(arena, if (delta > 0) "vol +5" else "vol -5"),
@@ -533,7 +488,7 @@ const Daemon = struct {
                         const step: i16 = @as(i16, delta) * 5;
                         const next = std.math.clamp(@as(i16, self.brightness) + step, 0, 100);
                         self.brightness = @intCast(next);
-                        deck.setBrightness(self.dev, self.brightness) catch {};
+                        deck.setBrightness(self.model, self.dev, self.brightness) catch {};
                     }
                 },
                 else => unreachable,
@@ -541,8 +496,9 @@ const Daemon = struct {
         }
     }
 
-    fn onDialPresses(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState, presses: [deck.dial_count]bool) void {
-        for (presses, 0..) |pressed, i| {
+    fn onDialPresses(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState, presses: [deck.max_dials]bool) void {
+        const dc = deck.dialCount(self.model);
+        for (presses[0..dc], 0..) |pressed, i| {
             if (!pressed or self.prev_dials[i]) continue;
             switch (i) {
                 0 => self.somaCmd(arena, "mute"),
@@ -568,14 +524,11 @@ const Daemon = struct {
     }
 };
 
-pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
+pub fn run(io: std.Io, dev: *hid.Device, model: deck.Model, cfg: *const config.Config) !void {
     const base_url = cfg.matrix_url;
-    // The HTTP client keeps a connection pool — its allocator must NOT be
-    // the cycle arena (that memory is freed every iteration).
     var http = std.http.Client{ .allocator = std.heap.page_allocator, .io = io };
     defer http.deinit();
 
-    // Live matrix framebuffer feed (same host as the control API, port 8888).
     const feed = try std.heap.page_allocator.create(ws.FrameFeed);
     feed.* = ws.FrameFeed.init(io, base_url);
     const feed_thread = try std.Thread.spawn(.{}, ws.FrameFeed.run, .{feed});
@@ -583,6 +536,7 @@ pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
 
     var d: Daemon = .{
         .dev = dev,
+        .model = model,
         .io = io,
         .mx = .{ .http = &http, .base = base_url },
         .sm = soma.Client.init(io),
@@ -598,28 +552,23 @@ pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
         };
         if (d.font != null) std.debug.print("font: using {s}\n", .{path});
     }
-    try deck.setBrightness(dev, d.brightness);
+    try deck.reset(model, dev);
+    try deck.setBrightness(model, dev, d.brightness);
 
-    // State polling runs on its own thread (like the framebuffer feed) so a
-    // slow/dead matrix or soma never stalls input handling on the deck.
     const poll_thread = try std.Thread.spawn(.{}, pollLoop, .{ io, &d });
     poll_thread.detach();
 
-    // MQTT publishes run on their own thread too: key presses only enqueue,
-    // so a dead broker can't stall the deck either.
     const pub_thread = try std.Thread.spawn(.{}, pubLoop, .{ io, &d });
     pub_thread.detach();
 
     var cycle = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer cycle.deinit();
 
-    // Survive the cable being pulled: eventLoop exits with DeviceGone, we
-    // wait for the deck to reappear, then pick up where we left off.
     while (true) {
-        eventLoop(io, dev, &d, &cycle) catch |err| switch (err) {
+        eventLoop(io, dev, model, &d, &cycle) catch |err| switch (err) {
             error.DeviceGone => {
-                reconnect(io, dev, &d) catch |e| switch (e) {
-                    error.DeviceGone => continue, // yanked again mid-reconnect
+                reconnect(io, dev, model, &d) catch |e| switch (e) {
+                    error.DeviceGone => continue,
                     else => return e,
                 };
             },
@@ -628,22 +577,19 @@ pub fn run(io: std.Io, dev: *hid.Device, cfg: *const config.Config) !void {
     }
 }
 
-fn eventLoop(io: std.Io, dev: *hid.Device, d: *Daemon, cycle: *std.heap.ArenaAllocator) !void {
+fn eventLoop(io: std.Io, dev: *hid.Device, model: deck.Model, d: *Daemon, cycle: *std.heap.ArenaAllocator) !void {
     const arena = cycle.allocator();
 
     _ = cycle.reset(.retain_capacity);
     {
-        // Give the poller's first round a moment so the first paint usually
-        // has real state — but cap it, or a dead matrix would stall startup
-        // (and the first input) just like the old in-loop polling did.
         var waited_ms: usize = 0;
         while (d.generation() == 0 and waited_ms < 1000) : (waited_ms += 10) {
             std.Io.sleep(io, .fromMilliseconds(10), .awake) catch break;
         }
         const snap = d.snapshot();
         try d.syncDisplay(arena, &snap);
-        std.debug.print("daemon running (matrix: {s} current: {s} | soma: {s} playing: {})\n", .{
-            d.mx.base, snap.currentScreen(), if (snap.sm_online) "online" else "offline", snap.sm_playing,
+        std.debug.print("daemon running ({s}, matrix: {s} current: {s} | soma: {s} playing: {})\n", .{
+            @tagName(model), d.mx.base, snap.currentScreen(), if (snap.sm_online) "online" else "offline", snap.sm_playing,
         });
     }
 
@@ -652,15 +598,17 @@ fn eventLoop(io: std.Io, dev: *hid.Device, d: *Daemon, cycle: *std.heap.ArenaAll
     while (true) {
         defer _ = cycle.reset(.retain_capacity);
         if (try dev.pollReport(&buf, 250)) |len| {
-            if (deck.parseReport(buf[0..len])) |report| {
+            if (deck.parseReport(model, buf[0..len])) |report| {
                 const snap = d.snapshot();
                 switch (report) {
                     .keys => |states| d.onKeys(arena, &snap, states),
                     .dial_deltas => |deltas| d.onDialDeltas(arena, &snap, deltas),
                     .dial_presses => |presses| d.onDialPresses(arena, &snap, presses),
                     .touch_swipe => |s| {
-                        const dx = @as(i32, s.to.x) - @as(i32, s.from.x);
-                        if (@abs(dx) > 60) d.jogMatrix(arena, &snap, if (dx > 0) 1 else -1);
+                        if (deck.hasStrip(model)) {
+                            const dx = @as(i32, s.to.x) - @as(i32, s.from.x);
+                            if (@abs(dx) > 60) d.jogMatrix(arena, &snap, if (dx > 0) 1 else -1);
+                        }
                     },
                     else => {},
                 }
@@ -668,9 +616,7 @@ fn eventLoop(io: std.Io, dev: *hid.Device, d: *Daemon, cycle: *std.heap.ArenaAll
             }
         }
         const now = std.Io.Clock.awake.now(io).toMilliseconds();
-        // Mirror page: follow the framebuffer stream, throttled to ~4 fps
-        // (the strip upload is a full JPEG each time; don't hammer USB).
-        if (d.page == .mirror and now - d.last_mirror_ms >= 250) {
+        if (d.page == .mirror and deck.hasStrip(model) and now - d.last_mirror_ms >= 250) {
             const c = d.feed.frameCounter();
             if (c != d.mirror_drawn_counter) {
                 d.mirror_drawn_counter = c;
@@ -683,8 +629,6 @@ fn eventLoop(io: std.Io, dev: *hid.Device, d: *Daemon, cycle: *std.heap.ArenaAll
                 d.strip_sig = d.stripSignature(&snap);
             }
         }
-        // The poller thread swapped in fresh state → re-sync (draws only if
-        // what the deck shows actually changed, same as after input).
         const gen = d.generation();
         if (gen != seen_gen) {
             seen_gen = gen;
@@ -694,10 +638,6 @@ fn eventLoop(io: std.Io, dev: *hid.Device, d: *Daemon, cycle: *std.heap.ArenaAll
     }
 }
 
-/// Poller thread: refresh matrix/soma state every 2 s and swap it into
-/// d.state. Never touches the deck; all its network stalls (dead matrix,
-/// down soma) stay off the event loop. Owns its own HTTP client/arena so
-/// nothing here races the command clients the event loop uses.
 fn pollLoop(io: std.Io, d: *Daemon) void {
     var http = std.http.Client{ .allocator = std.heap.page_allocator, .io = io };
     defer http.deinit();
@@ -741,10 +681,6 @@ fn pollLoop(io: std.Io, d: *Daemon) void {
     }
 }
 
-/// Publisher thread: drain the MQTT publish queue. All broker I/O —
-/// including the multi-second TCP connect stall when the broker is down —
-/// happens here, never on the event loop. ~100 ms worst-case latency from
-/// key press to publish, imperceptible next to the key's own debounce.
 fn pubLoop(io: std.Io, d: *Daemon) void {
     while (true) {
         while (d.dequeuePublish()) |item| {
@@ -761,27 +697,22 @@ fn pubLoop(io: std.Io, d: *Daemon) void {
     }
 }
 
-/// Cable was pulled: drop the corpse fd and wait for the deck to reappear
-/// (it comes back on a fresh hidraw node), then re-apply settings and
-/// force a full repaint.
-fn reconnect(io: std.Io, dev: *hid.Device, d: *Daemon) !void {
+fn reconnect(io: std.Io, dev: *hid.Device, model: deck.Model, d: *Daemon) !void {
     std.debug.print("deck unplugged — waiting for it to reappear\n", .{});
     dev.close();
     var path_buf: [64]u8 = undefined;
     while (true) {
         std.Io.sleep(io, .fromMilliseconds(500), .awake) catch {};
-        const found = hid.findDevicePath(&path_buf) catch continue;
-        const path = found orelse continue;
-        dev.* = hid.Device.open(path) catch continue;
-        std.debug.print("deck reconnected on {s}\n", .{path});
+        const found = hid.findDevice(&path_buf) catch continue;
+        const info = found orelse continue;
+        if (info.model != model) continue;
+        dev.* = hid.Device.open(info.path[0..info.path_len]) catch continue;
+        std.debug.print("deck reconnected on {s}\n", .{info.path[0..info.path_len]});
         break;
     }
-    // An unplug mid-upload can leave keys half-written on the panel, and
-    // input snapshots from the old session are stale: reset both so the
-    // next sync repaints everything and key diffs start clean.
     d.keys_sig = 0;
     d.strip_sig = 0;
-    d.prev_keys = .{false} ** deck.key_count;
-    d.prev_dials = .{false} ** deck.dial_count;
-    try deck.setBrightness(dev, d.brightness);
+    d.prev_keys = .{false} ** deck.max_keys;
+    d.prev_dials = .{false} ** deck.max_dials;
+    try deck.setBrightness(model, dev, d.brightness);
 }

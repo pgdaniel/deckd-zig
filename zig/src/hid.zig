@@ -1,8 +1,16 @@
 //! Raw hidraw access: device discovery, feature reports, report I/O.
 const std = @import("std");
+const deck = @import("deck.zig");
 
 pub const vid = 0x0fd9;
-pub const pid = 0x0084;
+pub const pid_plus = 0x0084;
+pub const pid_mini = 0x00b8;
+
+pub const DeviceInfo = struct {
+    path: [64]u8,
+    path_len: usize,
+    model: deck.Model,
+};
 
 // linux/hidraw.h: HIDIOC{S,G}FEATURE = _IOC(_IOC_WRITE|_IOC_READ, 'H', 0x06/0x07, len)
 fn ioc(dir: u32, ty: u32, nr: u32, size: u32) u32 {
@@ -45,7 +53,7 @@ pub const Device = struct {
         var buf: [32]u8 = std.mem.zeroes([32]u8);
         if (payload.len > buf.len) return error.PayloadTooLarge;
         @memcpy(buf[0..payload.len], payload);
-        const rc = std.os.linux.ioctl(self.fd, hidioCSFeature(buf.len), @intFromPtr(&buf));
+        const rc = std.os.linux.ioctl(self.fd, hidioCSFeature(payload.len), @intFromPtr(&buf));
         switch (std.os.linux.errno(rc)) {
             .SUCCESS => {},
             .IO, .NODEV, .NXIO => return error.DeviceGone,
@@ -86,11 +94,11 @@ pub const Device = struct {
     }
 };
 
-/// Find the /dev/hidrawN path for the Stream Deck Plus by matching
-/// VID/PID in /sys/class/hidraw/hidrawN/device/uevent. Returns null if
-/// absent. Probes the first 32 hidraw nodes (no directory iteration —
-/// std.fs has no Dir in zig 0.16).
-pub fn findDevicePath(buf: []u8) !?[]const u8 {
+/// Find the /dev/hidrawN path for a supported Stream Deck by matching
+/// VID/PID in /sys/class/hidraw/hidrawN/device/uevent. Returns the path
+/// and detected model, or null if no device is found. Probes the first 32
+/// hidraw nodes (no directory iteration — std.fs has no Dir in zig 0.16).
+pub fn findDevice(buf: []u8) !?DeviceInfo {
     var n: usize = 0;
     while (n < 32) : (n += 1) {
         var uevent_path_buf: [256]u8 = undefined;
@@ -99,8 +107,21 @@ pub fn findDevicePath(buf: []u8) !?[]const u8 {
         var content: [1024]u8 = undefined;
         const len = std.posix.read(fd, &content) catch 0;
         _ = std.os.linux.close(fd);
-        if (std.mem.indexOf(u8, content[0..len], "00000FD9:00000084") == null) continue;
-        return try std.fmt.bufPrint(buf, "/dev/hidraw{d}", .{n});
+        const slice = content[0..len];
+        const model: ?deck.Model = if (std.mem.indexOf(u8, slice, "00000FD9:00000084") != null)
+            .plus
+        else if (std.mem.indexOf(u8, slice, "00000FD9:000000B8") != null)
+            .mini
+        else
+            null;
+        if (model) |m| {
+            const path = try std.fmt.bufPrint(buf, "/dev/hidraw{d}", .{n});
+            var info: DeviceInfo = undefined;
+            @memcpy(info.path[0..path.len], path);
+            info.path_len = path.len;
+            info.model = m;
+            return info;
+        }
     }
     return null;
 }

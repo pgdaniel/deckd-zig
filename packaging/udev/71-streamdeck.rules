@@ -1,4 +1,5 @@
-# Elgato Stream Deck Plus (VID 0fd9 / PID 0084) — hidraw access for deckd.
+# Elgato Stream Deck Plus (VID 0fd9 / PID 0084) and Mini (PID 00b8) —
+# hidraw access for deckd.
 #
 # `uaccess` covers the common desktop case: logind tags the node for the
 # user with an active graphical/local session, matching the assumption in
@@ -7,3 +8,4 @@
 # group rw as a fallback — add the deckd user to that group there:
 #   usermod -aG input <user>
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0fd9", ATTRS{idProduct}=="0084", MODE="0660", GROUP="input", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0fd9", ATTRS{idProduct}=="00b8", MODE="0660", GROUP="input", TAG+="uaccess"
