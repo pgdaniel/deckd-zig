@@ -74,9 +74,20 @@ empty `topic` makes the key inert. `mqtt_host` must be a literal IP (or
 `localhost`); no DNS, no TLS — LAN brokers only. `mqtt_user`/`mqtt_pass` are
 optional. Knob roles are not configurable yet.
 
-Each key entry also takes an `"icon"` (absolute path to a PNG/JPEG/BMP/GIF):
-when set, it's drawn on the key (scaled to fit, alpha-blended, centered)
-instead of the label.
+Each key entry also takes an `"icon"` (absolute path, no `~` expansion — same
+convention as `font_path`): when set, it's drawn on the key (scaled to fit,
+alpha-blended, centered) instead of the label.
+
+- **Format**: PNG, JPEG, BMP, or GIF. Use PNG for a transparent background —
+  alpha is honored, so it blends into the key's configured `color` instead of
+  showing a black box.
+- **Size**: no fixed requirement (it's scaled to fit, letterboxed, aspect
+  preserved), but the keys are **80×80** on the Mini and **120×120** on the
+  Plus, and scaling is nearest-neighbor — downscaling a bigger image looks
+  clean, upscaling a small one looks blocky. **120×120 square** is a safe
+  default that downscales fine to the Mini too.
+- The source file is read into a fixed 1 MiB buffer — plenty for an icon,
+  but a larger file is rejected outright rather than truncated.
 
 ### Config GUI
 
