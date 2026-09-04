@@ -18,8 +18,12 @@
 //!   Strip left/right swipe jogs matrix screens too.
 //!
 //! On the Mini (6 keys, no strip, no dials):
-//!   Only the MATRIX page is active (no page cycling, no strip, no dials).
-//!   Keys direct-select matrix screens.
+//!   No knobs, so the last key is reserved as the page button: tap it to
+//!   cycle MATRIX → SOMA → MQTT → MATRIX (no MIRROR page — that only drives
+//!   the strip, which the Mini doesn't have). Its image always shows the
+//!   current page name and stays bordered so it reads as "the button that
+//!   does something else". The other 5 keys behave like the Plus's
+//!   per-page keys (screen-select / SomaFM preset / MQTT publish).
 //!
 //! Threading: a poller thread refreshes matrix/soma state every 2 s and
 //! swaps it in wholesale (see PollState); the event loop never blocks on
@@ -266,19 +270,47 @@ const Daemon = struct {
         };
     }
 
+    /// Index of the reserved page-cycle key, on devices with no dials to
+    /// drive page switching otherwise (the Mini). Null on devices that
+    /// switch pages via a knob push instead (the Plus), where all keys are
+    /// content keys.
+    fn pageKeyIndex(model: deck.Model) ?u8 {
+        if (deck.dialCount(model) != 0) return null;
+        return deck.keyCount(model) - 1;
+    }
+
     fn drawKeys(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState) !void {
         const kc = deck.keyCount(self.model);
+        const content_kc = if (pageKeyIndex(self.model)) |_| kc - 1 else kc;
         switch (self.page) {
-            .matrix, .mirror => for (self.cfg.matrix_keys[0..kc], 0..) |ka, i| {
+            .matrix, .mirror => for (self.cfg.matrix_keys[0..content_kc], 0..) |ka, i| {
                 try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.screen, self.activeKeyName(snap)));
             },
-            .soma => for (self.cfg.soma_keys[0..kc], 0..) |ka, i| {
+            .soma => for (self.cfg.soma_keys[0..content_kc], 0..) |ka, i| {
                 try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.id, self.activeKeyName(snap)));
             },
-            .mqtt => for (self.cfg.mqtt_keys[0..kc], 0..) |ka, i| {
+            .mqtt => for (self.cfg.mqtt_keys[0..content_kc], 0..) |ka, i| {
                 try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, false);
             },
         }
+        if (pageKeyIndex(self.model)) |pk| try self.drawPageKey(arena, pk);
+    }
+
+    /// The reserved page button: always shows the current page's name, and
+    /// stays bordered (like an "active" content key) so it's visually
+    /// distinct from the content keys around it.
+    fn drawPageKey(self: *Daemon, arena: std.mem.Allocator, key: u8) !void {
+        const label: []const u8 = switch (self.page) {
+            .matrix, .mirror => "MATRIX",
+            .soma => "SOMA",
+            .mqtt => "MQTT",
+        };
+        const rgb: [3]u8 = switch (self.page) {
+            .matrix, .mirror => .{ 0, 220, 255 },
+            .soma => .{ 120, 220, 120 },
+            .mqtt => .{ 240, 180, 60 },
+        };
+        try self.drawKey(arena, key, label, rgb[0], rgb[1], rgb[2], true);
     }
 
     fn drawKey(self: *Daemon, arena: std.mem.Allocator, key: u8, label: []const u8, r: u8, g: u8, b: u8, active: bool) !void {
@@ -434,8 +466,18 @@ const Daemon = struct {
 
     fn onKeys(self: *Daemon, arena: std.mem.Allocator, snap: *const PollState, states: [deck.max_keys]bool) void {
         const kc = deck.keyCount(self.model);
+        const page_key = pageKeyIndex(self.model);
         for (states[0..kc], 0..) |pressed, i| {
             if (!pressed or self.prev_keys[i]) continue;
+            if (page_key != null and i == page_key.?) {
+                self.page = switch (self.page) {
+                    .matrix, .mirror => .soma,
+                    .soma => .mqtt,
+                    .mqtt => .matrix,
+                };
+                std.debug.print("page → {s}\n", .{@tagName(self.page)});
+                continue;
+            }
             switch (self.page) {
                 .matrix, .mirror => {
                     const ka = self.cfg.matrix_keys[i];
