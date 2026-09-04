@@ -21,11 +21,12 @@ Pinned to zig 0.16.0 (see `.tool-versions`; matches soma-zig):
 
 ```
 cd zig
-zig build          # produces zig-out/bin/deckd
+zig build          # produces zig-out/bin/deckd (+ deckd-config if gtk4 is found)
 zig build test     # protocol parser tests (built from real captured bytes)
 ```
 
-Vendored: `stb_image_write.h` for JPEG encoding (keys/strip only accept JPEG).
+Vendored: `stb_image_write.h` for JPEG encoding (keys/strip only accept JPEG),
+`stb_image.h` for decoding icon files (see `icon` in Configuration below).
 
 ## Running
 
@@ -72,6 +73,21 @@ fields it changes. Soma keys take any SomaFM channel id plus the special ids
 empty `topic` makes the key inert. `mqtt_host` must be a literal IP (or
 `localhost`); no DNS, no TLS — LAN brokers only. `mqtt_user`/`mqtt_pass` are
 optional. Knob roles are not configurable yet.
+
+Each key entry also takes an `"icon"` (absolute path to a PNG/JPEG/BMP/GIF):
+when set, it's drawn on the key (scaled to fit, alpha-blended, centered)
+instead of the label.
+
+### Config GUI
+
+`zig-out/bin/deckd-config` — a standalone GTK4 app for editing
+`config.json` without hand-writing JSON: every field above, all 8 possible
+key slots per array (a Mini/Plus toggle just dims the ones a 6-key Mini
+ignores — it never discards them), a color picker, and a file picker for
+`icon`. Entirely independent of the daemon; it shares nothing but the
+on-disk schema. Only built when `pkg-config --exists gtk4` succeeds —
+skipped (with a note, not a failure) on a headless build with no GTK. Saving
+keeps one rotating `.bak` of whatever it overwrites.
 
 ### Fonts
 
@@ -231,6 +247,8 @@ the image into noise lines). 800×100 JPEG, no rotation needed.
 | `zig/src/config.zig` | `~/.config/deckd/config.json` loading + default key maps |
 | `zig/src/daemon.zig` | pages, knob wiring, strip layouts, main loop |
 | `zig/src/main.zig` | CLI (`run` + dev commands) |
+| `zig/src/config_gui.zig` | `deckd-config`: standalone GTK4 config.json editor |
+| `zig/tools/gen_gtk_header.sh` | flattens the system's gtk/gtk.h for `deckd-config`'s `@cImport` |
 | `systemd/deckd.service` | user service for running at login |
 | `packaging/` | PKGBUILD (Arch) and SlackBuild (Slackware) for deploying to other servers |
 
