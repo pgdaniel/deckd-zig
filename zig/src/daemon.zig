@@ -284,13 +284,13 @@ const Daemon = struct {
         const content_kc = if (pageKeyIndex(self.model)) |_| kc - 1 else kc;
         switch (self.page) {
             .matrix, .mirror => for (self.cfg.matrix_keys[0..content_kc], 0..) |ka, i| {
-                try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.screen, self.activeKeyName(snap)));
+                try self.drawKey(arena, @intCast(i), ka.label, ka.icon, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.screen, self.activeKeyName(snap)));
             },
             .soma => for (self.cfg.soma_keys[0..content_kc], 0..) |ka, i| {
-                try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.id, self.activeKeyName(snap)));
+                try self.drawKey(arena, @intCast(i), ka.label, ka.icon, ka.r, ka.g, ka.b, std.mem.eql(u8, ka.id, self.activeKeyName(snap)));
             },
             .mqtt => for (self.cfg.mqtt_keys[0..content_kc], 0..) |ka, i| {
-                try self.drawKey(arena, @intCast(i), ka.label, ka.r, ka.g, ka.b, false);
+                try self.drawKey(arena, @intCast(i), ka.label, ka.icon, ka.r, ka.g, ka.b, false);
             },
         }
         if (pageKeyIndex(self.model)) |pk| try self.drawPageKey(arena, pk);
@@ -310,14 +310,24 @@ const Daemon = struct {
             .soma => .{ 120, 220, 120 },
             .mqtt => .{ 240, 180, 60 },
         };
-        try self.drawKey(arena, key, label, rgb[0], rgb[1], rgb[2], true);
+        try self.drawKey(arena, key, label, "", rgb[0], rgb[1], rgb[2], true);
     }
 
-    fn drawKey(self: *Daemon, arena: std.mem.Allocator, key: u8, label: []const u8, r: u8, g: u8, b: u8, active: bool) !void {
+    /// Draw one key's canvas: an icon file if configured (scaled to fit,
+    /// alpha-blended, centered — falling back to the label if it fails to
+    /// load), else the label text.
+    fn drawKey(self: *Daemon, arena: std.mem.Allocator, key: u8, label: []const u8, icon: []const u8, r: u8, g: u8, b: u8, active: bool) !void {
         const kpx = deck.keyPx(self.model);
         var img = try image.Image.init(arena, kpx, kpx);
         img.fill(r / 6, g / 6, b / 6);
-        self.drawCenteredText(&img, label, kpx / 2, self.cfg.font_size_key, r, g, b);
+        if (icon.len > 0) {
+            image.drawIconFit(&img, icon) catch |err| {
+                std.debug.print("icon: {s} failed ({s}), falling back to label\n", .{ icon, @errorName(err) });
+                self.drawCenteredText(&img, label, kpx / 2, self.cfg.font_size_key, r, g, b);
+            };
+        } else {
+            self.drawCenteredText(&img, label, kpx / 2, self.cfg.font_size_key, r, g, b);
+        }
         if (active) render.border(&img, 4, 255, 255, 255);
         try deck.setKeyImage(self.model, self.dev, key, &img);
     }

@@ -4,7 +4,7 @@
 //! {
 //!   "matrix_url": "http://192.168.1.109:8787",
 //!   "brightness": 80,
-//!   "matrix_keys": [ {"label": "WEATHER", "screen": "weather-cyberpunk", "color": "ff8c00"}, ... ],
+//!   "matrix_keys": [ {"label": "WEATHER", "screen": "weather-cyberpunk", "color": "ff8c00", "icon": "/home/me/icons/weather.png"}, ... ],
 //!   "soma_keys":   [ {"label": "GROOVE",  "id": "groovesalad",        "color": "78dc78"}, ... ],
 //!   "mqtt_host": "192.168.1.10", "mqtt_port": 1883,
 //!   "mqtt_user": "...", "mqtt_pass": "...",
@@ -15,7 +15,10 @@
 //! an entry may set just the fields it wants to change. Soma keys also accept
 //! the special ids "viz" and "stop". MQTT keys publish payload to topic on
 //! press; an empty topic disables the key. mqtt_host must be a literal IP (or
-//! "localhost") — no DNS.
+//! "localhost") — no DNS. icon is an absolute path to a PNG/JPEG/BMP/GIF
+//! file (same convention as font_path — no ~ expansion): when set, it's
+//! drawn on the key (scaled to fit, alpha-blended, centered) instead of the
+//! label text.
 const std = @import("std");
 const deck = @import("deck.zig");
 
@@ -25,6 +28,7 @@ pub const KeyAction = struct {
     r: u8,
     g: u8,
     b: u8,
+    icon: []const u8 = "", // path to an image file; set = draw it instead of label
 };
 
 pub const SomaKey = struct {
@@ -33,6 +37,7 @@ pub const SomaKey = struct {
     r: u8,
     g: u8,
     b: u8,
+    icon: []const u8 = "",
 };
 
 pub const MqttKey = struct {
@@ -42,6 +47,7 @@ pub const MqttKey = struct {
     r: u8,
     g: u8,
     b: u8,
+    icon: []const u8 = "",
 };
 
 pub const Config = struct {
@@ -129,6 +135,7 @@ const JsonKey = struct {
     topic: ?[]const u8 = null,
     payload: ?[]const u8 = null,
     color: ?[]const u8 = null,
+    icon: ?[]const u8 = null,
 };
 
 const JsonConfig = struct {
@@ -216,6 +223,7 @@ pub fn load(arena: std.mem.Allocator, model: deck.Model) Config {
         const jk = maybe orelse continue;
         if (jk.label) |v| cfg.matrix_keys[i].label = v;
         if (jk.screen) |v| cfg.matrix_keys[i].screen = v;
+        if (jk.icon) |v| cfg.matrix_keys[i].icon = v;
         if (jk.color) |v| {
             if (parseColor(v)) |rgb| {
                 cfg.matrix_keys[i].r = rgb[0];
@@ -229,6 +237,7 @@ pub fn load(arena: std.mem.Allocator, model: deck.Model) Config {
         const jk = maybe orelse continue;
         if (jk.label) |v| cfg.soma_keys[i].label = v;
         if (jk.id) |v| cfg.soma_keys[i].id = v;
+        if (jk.icon) |v| cfg.soma_keys[i].icon = v;
         if (jk.color) |v| {
             if (parseColor(v)) |rgb| {
                 cfg.soma_keys[i].r = rgb[0];
@@ -243,6 +252,7 @@ pub fn load(arena: std.mem.Allocator, model: deck.Model) Config {
         if (jk.label) |v| cfg.mqtt_keys[i].label = v;
         if (jk.topic) |v| cfg.mqtt_keys[i].topic = v;
         if (jk.payload) |v| cfg.mqtt_keys[i].payload = v;
+        if (jk.icon) |v| cfg.mqtt_keys[i].icon = v;
         if (jk.color) |v| {
             if (parseColor(v)) |rgb| {
                 cfg.mqtt_keys[i].r = rgb[0];
