@@ -57,13 +57,13 @@ defaults in `zig/src/config.zig`:
   "font_path": "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Bold.ttf",
   "font_size_key": 22,
   "font_size_strip": 30,
-  "matrix_keys": [ { "label": "WEATHER", "screen": "weather-cyberpunk", "color": "ff8c00" } ],
-  "soma_keys":   [ { "label": "GROOVE",  "id": "groovesalad",        "color": "78dc78" } ],
+  "matrix_keys": [ { "label": "WEATHER", "screen": "weather-cyberpunk", "color": "ff8c00", "icon": "/home/me/deckd-zig/assets/icons/weather.png" } ],
+  "soma_keys":   [ { "label": "GROOVE",  "id": "groovesalad",        "color": "78dc78", "icon": "/home/me/deckd-zig/assets/icons/groove.png" } ],
   "mqtt_host": "192.168.1.10",
   "mqtt_port": 1883,
   "mqtt_user": "",
   "mqtt_pass": "",
-  "mqtt_keys": [ { "label": "LT ON", "topic": "home/lights/set", "payload": "ON", "color": "ffc850" } ]
+  "mqtt_keys": [ { "label": "LT ON", "topic": "home/lights/set", "payload": "ON", "color": "ffc850", "icon": "/home/me/deckd-zig/assets/icons/office.png" } ]
 }
 ```
 
@@ -88,6 +88,15 @@ alpha-blended, centered) instead of the label.
   default that downscales fine to the Mini too.
 - The source file is read into a fixed 1 MiB buffer — plenty for an icon,
   but a larger file is rejected outright rather than truncated.
+
+`assets/icons/` has one ready-made icon per key in the defaults above (from
+[Phosphor Icons](https://phosphoricons.com), MIT-licensed — bold weight,
+white on transparent, 256×256), which the sample config below already
+points at. `tools/fetch-phosphor-icons.sh` regenerates them and documents
+the exact icon chosen for each key (and why, where nothing was a literal
+match) — re-run it if you change the mapping. It needs `curl` and
+`rsvg-convert` and fetches from `raw.githubusercontent.com` — it's a
+maintainer tool, not part of `zig build`.
 
 ### Config GUI
 
@@ -260,6 +269,8 @@ the image into noise lines). 800×100 JPEG, no rotation needed.
 | `zig/src/main.zig` | CLI (`run` + dev commands) |
 | `zig/src/config_gui.zig` | `deckd-config`: standalone GTK4 config.json editor |
 | `zig/tools/gen_gtk_header.sh` | flattens the system's gtk/gtk.h for `deckd-config`'s `@cImport` |
+| `assets/icons/` | ready-made Phosphor icons, one per default key |
+| `tools/fetch-phosphor-icons.sh` | regenerates `assets/icons/` (key → icon mapping documented inline) |
 | `systemd/deckd.service` | user service for running at login |
 | `packaging/` | PKGBUILD (Arch) and SlackBuild (Slackware) for deploying to other servers |
 
