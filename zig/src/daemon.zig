@@ -366,7 +366,9 @@ const Daemon = struct {
                     self.drawCenteredText(&img, "SOMA OFFLINE", 50, self.cfg.font_size_strip, 255, 60, 60);
                 } else {
                     self.drawCenteredText(&img, if (snap.sm_playing) snap.somaChannel() else "SOMA (stopped)", 28, self.cfg.font_size_strip, 120, 240, 140);
-                    self.drawCenteredText(&img, snap.somaTrack()[0..@min(snap.somaTrack().len, 48)], 60, 16, 140, 140, 160);
+                    if (snap.sm_playing) {
+                        self.drawCenteredText(&img, snap.somaTrack()[0..@min(snap.somaTrack().len, 48)], 60, 16, 140, 140, 160);
+                    }
                     var vol_buf: [16]u8 = undefined;
                     const vol = std.fmt.bufPrint(&vol_buf, "VOL {d}%", .{snap.sm_volume}) catch "";
                     self.drawCenteredText(&img, vol, 84, 16, 200, 200, 120);
