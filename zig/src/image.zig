@@ -68,12 +68,19 @@ pub fn encodeJpeg(img: *const Image, quality: c_int, out: *std.ArrayList(u8), al
     if (ok == 0 or ctx.failed) return error.EncodeFailed;
 }
 
+/// Icon fit margin: the icon is scaled to fit within this fraction of
+/// dst's bounds rather than the full canvas, so it doesn't touch the
+/// key's edges (an icon scaled to fill the whole key reads as cropped/
+/// cramped at a glance, even though nothing is actually cut off).
+const icon_fit_margin: f32 = 0.8;
+
 /// Decode an icon file (PNG/JPEG/BMP/GIF) and alpha-blend it onto dst,
-/// nearest-neighbor scaled to fit dst's bounds (preserving aspect ratio)
-/// and centered. dst should already be filled with the desired background
-/// — that shows through untouched wherever the icon is transparent or
-/// letterboxed. Icons are expected to be small; the file is read into a
-/// fixed 1 MiB buffer and rejected outright if it doesn't fit.
+/// nearest-neighbor scaled to fit dst's bounds (preserving aspect ratio,
+/// leaving a margin — see icon_fit_margin) and centered. dst should
+/// already be filled with the desired background — that shows through
+/// untouched wherever the icon is transparent, letterboxed, or margined.
+/// Icons are expected to be small; the file is read into a fixed 1 MiB
+/// buffer and rejected outright if it doesn't fit.
 pub fn drawIconFit(dst: *Image, path: []const u8) !void {
     const fd = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0);
     defer _ = std.os.linux.close(fd);
@@ -91,7 +98,7 @@ pub fn drawIconFit(dst: *Image, path: []const u8) !void {
     const sw: usize = @intCast(w);
     const sh: usize = @intCast(h);
 
-    const scale = @min(
+    const scale = icon_fit_margin * @min(
         @as(f32, @floatFromInt(dst.w)) / @as(f32, @floatFromInt(sw)),
         @as(f32, @floatFromInt(dst.h)) / @as(f32, @floatFromInt(sh)),
     );
