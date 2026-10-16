@@ -20,6 +20,7 @@ Per-machine topics (<p> = prefix, <h> = name) — always act, whoever is playing
     <p>/<h>/skip       >0 next, <0 previous
     <p>/<h>/status     online / offline (retained; offline is the last-will)
     <p>/<h>/state/{playing,artist,track,album,volume}   (retained)
+    <p>/<h>/state/art  album cover, raw JPEG/PNG bytes (retained; empty = none)
 
 Shared topics — the same commands without <h>, e.g. <p>/cmd. Only the
 "active" machine acts on them: the one that is playing, or, when nothing is,
@@ -37,11 +38,14 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
 
 DEST_PREFIX = "org.mpris.MediaPlayer2."
 PATH = "/org/mpris/MediaPlayer2"
 IFACE = "org.mpris.MediaPlayer2.Player"
 FIELDS = ("playing", "artist", "track", "album", "volume")
+MAX_ART = 180 * 1024
 
 
 def env(name, default=""):
@@ -177,7 +181,28 @@ def read_state(dest):
         "track": str(m("xesam:title")),
         "album": str(m("xesam:album")),
         "volume": str(int(round(float(props.get("Volume", {}).get("data", 0)) * 100))),
+        "art_url": str(m("mpris:artUrl")),
     }
+
+
+def fetch_art(url):
+    """Cover image bytes for an MPRIS artUrl, or b"" if unavailable."""
+    try:
+        if url.startswith("file://"):
+            with open(urllib.parse.unquote(url[7:]), "rb") as f:
+                data = f.read(MAX_ART + 1)
+        elif url.startswith(("http://", "https://")):
+            with urllib.request.urlopen(url, timeout=5) as r:
+                data = r.read(MAX_ART + 1)
+        else:
+            return b""
+    except Exception as e:
+        print(f"spotify-mqtt: cover {url}: {e}", file=sys.stderr, flush=True)
+        return b""
+    if len(data) > MAX_ART:
+        print(f"spotify-mqtt: cover {url} too large, skipping", file=sys.stderr, flush=True)
+        return b""
+    return data
 
 
 def call(dest, method):
@@ -225,6 +250,13 @@ def main():
     active_host = None
     state = None
     last = {}
+    art_cache = {"url": None, "data": b""}
+
+    def art_for(url):
+        if url != art_cache["url"]:
+            art_cache["url"] = url
+            art_cache["data"] = fetch_art(url) if url else b""
+        return art_cache["data"]
 
     def pub(topic, value):
         if last.get(topic) != value:
@@ -236,20 +268,25 @@ def main():
         dest = find_player(wanted)
         new = read_state(dest) if dest else None
         state = new
+        art = art_for(new.get("art_url", "")) if new else None
         values = new or {"playing": "off", "artist": "", "track": "", "album": "", "volume": "0"}
         for f in FIELDS:
             if new or f == "playing":  # a closed player only flips playing to off
                 pub(f"{mine}/state/{f}", values[f])
+        if art is not None:
+            pub(f"{mine}/state/art", art)
         playing = values["playing"] == "on"
         if playing and active_host != me:
             mq.publish(f"{shared}/state/host", me, retain=True)
             active_host = me
-            for f in FIELDS:
+            for f in FIELDS + ("art",):
                 last.pop(f"{shared}/state/{f}", None)
         if playing or active_host == me:
             for f in FIELDS:
                 if new or f == "playing":
                     pub(f"{shared}/state/{f}", values[f])
+            if art is not None:
+                pub(f"{shared}/state/art", art)
         return dest
 
     def handle(topic, payload, retain):
