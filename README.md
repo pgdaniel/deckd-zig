@@ -94,12 +94,30 @@ A key (`keys[i]`, up to 8 per page, patched by index):
 
 ### Page backgrounds
 
-A page may set `"background_topic": "some/topic"`. That topic's message is an
-image (raw JPEG/PNG bytes, up to ~190 KB; an empty message clears it).
-deckd center-crops it across the whole device, keys and touch strip as one
-canvas (the gaps between the LCDs are skipped), and dims it behind the
-labels, icons and strip text. One background topic per
-config. Any publisher works; the Spotify bridge sends the album cover.
+Any page can have a background. Set `"background_topic"` on the page to a
+topic whose message is an image (raw JPEG/PNG bytes, up to ~190 KB):
+
+```json
+{ "name": "CAMERA", "background_topic": "home/door/snapshot",
+  "keys": [ { "label": "OPEN", "topic": "home/door/cmd", "payload": "open" } ],
+  "strip": ["{@page}"] }
+```
+
+deckd center-crops the image across the whole device, keys and touch strip as
+one canvas (the gaps between the LCDs are skipped), and dims it behind the
+labels, icons and strip text. It redraws whenever a new image arrives, and an
+empty message clears it. Publish retained so the page has its picture right
+after a restart. Try one by hand:
+
+```
+mosquitto_pub -h <broker> -r -t home/door/snapshot -f photo.jpg
+```
+
+Notes: pages that share the same `background_topic` show the same image;
+pages without one are unaffected; only one distinct background topic is
+supported per config. The Spotify bridge publishes the album cover on
+`spotify/state/art` (see below), which is how the SPOTIFY page gets its
+background.
 
 ### Templates
 
