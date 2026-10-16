@@ -53,6 +53,8 @@ pub const OnState = *const fn (ctx: *anyopaque, connected: bool) void;
 /// Long-lived connection. `run` never returns — spawn it on its own thread.
 /// `publish` and `ping` may be called from any other thread; they fail with
 /// error.Offline while disconnected (callers surface that, never block).
+const max_body = 256 * 1024;
+
 pub const Session = struct {
     io: std.Io,
     host: []const u8,
@@ -123,7 +125,9 @@ pub const Session = struct {
         std.debug.print("mqtt: connected to {s}:{d} ({d} subscriptions)\n", .{ self.host, self.port, self.subscriptions.len });
         self.on_state(self.ctx, true);
 
-        var body: [4096]u8 = undefined;
+        // Big enough for a cover-art JPEG; heap, not stack.
+        const body = try std.heap.page_allocator.alloc(u8, max_body);
+        defer std.heap.page_allocator.free(body);
         while (true) {
             const b0 = try r.takeByte();
             var remaining: usize = 0;

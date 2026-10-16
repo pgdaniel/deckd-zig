@@ -39,6 +39,11 @@
 //! alternatives. A page's `dials` entry replaces the global one at the same
 //! index while that page is showing; null entries keep the global dial.
 //!
+//! Backgrounds: a page's `background_topic` names a topic whose message is
+//! an image (JPEG/PNG bytes, up to ~250 KB). It is center-cropped across the
+//! whole key grid and shown dimmed behind the labels/icons. An empty message
+//! clears it. One background topic is supported per config.
+//!
 //! Key/dial/page lists patch by index. mqtt_host must be a literal IP (or
 //! "localhost") — no DNS. icon is an absolute path to a PNG/JPEG/BMP/GIF
 //! file (no ~ expansion, same as font_path), drawn instead of the label.
@@ -79,6 +84,8 @@ pub const Dial = struct {
 
 pub const Page = struct {
     name: []const u8 = "",
+    /// Topic carrying a JPEG/PNG shown dimmed behind all of this page's keys.
+    background_topic: []const u8 = "",
     r: u8 = 240,
     g: u8 = 180,
     b: u8 = 60,
@@ -144,6 +151,7 @@ const JsonDial = struct {
 
 const JsonPage = struct {
     name: ?[]const u8 = null,
+    background_topic: ?[]const u8 = null,
     color: ?[]const u8 = null,
     keys: []?JsonKey = &.{},
     strip: []const []const u8 = &.{},
@@ -244,6 +252,7 @@ pub fn load(arena: std.mem.Allocator, model: deck.Model) Config {
             const page = &cfg.pages[pi];
             page.* = .{};
             page.name = jp.name orelse (std.fmt.allocPrint(arena, "PAGE {d}", .{pi + 1}) catch "PAGE");
+            if (jp.background_topic) |t| page.background_topic = t;
             if (jp.color) |v| {
                 if (parseColor(v)) |rgb| {
                     page.r = rgb[0];

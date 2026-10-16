@@ -129,3 +129,64 @@ pub fn drawIconFit(dst: *Image, path: []const u8) !void {
         }
     }
 }
+
+/// Decode a JPEG/PNG from memory and "cover" it into dst: scaled (bilinear)
+/// so it fills dst completely, center-cropping whichever axis overflows.
+pub fn decodeCover(dst: *Image, bytes: []const u8) !void {
+    var w: c_int = 0;
+    var h: c_int = 0;
+    var channels: c_int = 0;
+    const rgb = ic.stbi_load_from_memory(bytes.ptr, @intCast(bytes.len), &w, &h, &channels, 3);
+    if (rgb == null or w <= 0 or h <= 0) return error.DecodeFailed;
+    defer ic.stbi_image_free(rgb);
+    const sw: usize = @intCast(w);
+    const sh: usize = @intCast(h);
+
+    const dw: f32 = @floatFromInt(dst.w);
+    const dh: f32 = @floatFromInt(dst.h);
+    const fsw: f32 = @floatFromInt(sw);
+    const fsh: f32 = @floatFromInt(sh);
+    const s = @max(dw / fsw, dh / fsh);
+    const off_x = (fsw - dw / s) / 2;
+    const off_y = (fsh - dh / s) / 2;
+
+    var y: usize = 0;
+    while (y < dst.h) : (y += 1) {
+        const fy = std.math.clamp((@as(f32, @floatFromInt(y)) + 0.5) / s + off_y - 0.5, 0, fsh - 1);
+        const y0: usize = @intFromFloat(fy);
+        const y1 = @min(sh - 1, y0 + 1);
+        const ty = fy - @as(f32, @floatFromInt(y0));
+        var x: usize = 0;
+        while (x < dst.w) : (x += 1) {
+            const fx = std.math.clamp((@as(f32, @floatFromInt(x)) + 0.5) / s + off_x - 0.5, 0, fsw - 1);
+            const x0: usize = @intFromFloat(fx);
+            const x1 = @min(sw - 1, x0 + 1);
+            const tx = fx - @as(f32, @floatFromInt(x0));
+            const di = (y * dst.w + x) * 3;
+            inline for (0..3) |ch| {
+                const p00: f32 = @floatFromInt(rgb[(y0 * sw + x0) * 3 + ch]);
+                const p10: f32 = @floatFromInt(rgb[(y0 * sw + x1) * 3 + ch]);
+                const p01: f32 = @floatFromInt(rgb[(y1 * sw + x0) * 3 + ch]);
+                const p11: f32 = @floatFromInt(rgb[(y1 * sw + x1) * 3 + ch]);
+                const top = p00 + (p10 - p00) * tx;
+                const bot = p01 + (p11 - p01) * tx;
+                dst.px[di + ch] = @intFromFloat(@round(top + (bot - top) * ty));
+            }
+        }
+    }
+}
+
+/// Copy the dst-sized window of src at (sx, sy) into dst, scaled to
+/// `percent` brightness (so text drawn on top stays readable).
+pub fn blitDim(dst: *Image, src: *const Image, sx: usize, sy: usize, percent: u16) void {
+    var y: usize = 0;
+    while (y < dst.h) : (y += 1) {
+        var x: usize = 0;
+        while (x < dst.w) : (x += 1) {
+            if (sx + x >= src.w or sy + y >= src.h) continue;
+            const si = ((sy + y) * src.w + sx + x) * 3;
+            const di = (y * dst.w + x) * 3;
+            inline for (0..3) |ch| dst.px[di + ch] = @intCast(@as(u16, src.px[si + ch]) * percent / 100);
+        }
+    }
+}

@@ -92,6 +92,14 @@ A key (`keys[i]`, up to 8 per page, patched by index):
 | `topic`, `payload`, `retain` | published when pressed; empty `topic` = publish nothing |
 | `active_topic`, `active_value` | white border while that topic's latest message equals the value (empty value = `ON`/`1`/`true`) |
 
+### Page backgrounds
+
+A page may set `"background_topic": "some/topic"`. That topic's message is an
+image (raw JPEG/PNG bytes, up to ~190 KB; an empty message clears it).
+deckd center-crops it across the whole key grid, so the keys act as one
+screen, and dims it behind the labels and icons. One background topic per
+config. Any publisher works; the Spotify bridge sends the album cover.
+
 ### Templates
 
 `label` and each of a page's `strip` lines (up to 3: a large line, then two
@@ -230,7 +238,10 @@ example config uses exactly these topics.
   commands on `spotify/<hostname>/{cmd,skip,vol/set,vol/adj}`. The *shared*
   topics (`spotify/cmd`, `spotify/state/*`, ...) follow whichever PC is
   playing (or played last), so one SPOTIFY page controls whichever machine
-  has music on; `spotify/state/host` says which. See the script header.
+  has music on; `spotify/state/host` says which. The album cover goes out as
+  JPEG bytes on `.../state/art`; give the SPOTIFY page
+  `"background_topic": "spotify/state/art"` to show it behind the keys. See
+  the script header.
 
 ### Config GUI
 

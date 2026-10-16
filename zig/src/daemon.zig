@@ -58,6 +58,17 @@ const Daemon = struct {
     link_up: Atomic(bool) = .init(false),
     link_gen: Atomic(u32) = .init(0),
 
+    // Page background image (see config.Page.background_topic). The MQTT
+    // thread fills art_buf under art_mtx; the event loop decodes it into `wall`.
+    art_topic: []const u8 = "",
+    art_mtx: std.Io.Mutex = .init,
+    art_buf: []u8 = &.{},
+    art_len: usize = 0,
+    art_gen: u32 = 0,
+    art_applied: u32 = 0,
+    wall: image.Image = undefined,
+    wall_ok: bool = false,
+
     page_set_topic: []const u8 = "",
     bright_set_topic: []const u8 = "",
 
@@ -145,9 +156,40 @@ const Daemon = struct {
             if (std.fmt.parseInt(i32, std.mem.trim(u8, payload, " "), 10)) |v| {
                 self.req_brightness.store(v, .release);
             } else |_| {}
+        } else if (self.art_topic.len > 0 and std.mem.eql(u8, topic, self.art_topic)) {
+            self.setArt(payload);
         } else {
             _ = self.store.set(topic, payload);
         }
+    }
+
+    fn setArt(self: *Daemon, payload: []const u8) void {
+        self.art_mtx.lockUncancelable(self.io);
+        defer self.art_mtx.unlock(self.io);
+        if (payload.len > self.art_buf.len) {
+            std.debug.print("art: {d} byte image too big, ignoring\n", .{payload.len});
+            self.art_len = 0;
+        } else {
+            @memcpy(self.art_buf[0..payload.len], payload);
+            self.art_len = payload.len;
+        }
+        self.art_gen +%= 1;
+    }
+
+    /// Decode a newly arrived image into the key-grid-sized `wall`.
+    fn refreshArt(self: *Daemon) void {
+        if (self.art_topic.len == 0) return;
+        self.art_mtx.lockUncancelable(self.io);
+        defer self.art_mtx.unlock(self.io);
+        if (self.art_gen == self.art_applied) return;
+        self.art_applied = self.art_gen;
+        self.wall_ok = false;
+        if (self.art_len == 0) return;
+        image.decodeCover(&self.wall, self.art_buf[0..self.art_len]) catch |err| {
+            std.debug.print("art: decode failed ({s})\n", .{@errorName(err)});
+            return;
+        };
+        self.wall_ok = true;
     }
 
     fn onState(ctx: *anyopaque, connected: bool) void {
@@ -181,14 +223,18 @@ const Daemon = struct {
         const kc = deck.keyCount(self.model);
         const content_kc = if (pageKeyIndex(self.model)) |_| kc - 1 else kc;
         const page = self.pageCfg();
+        self.refreshArt();
+        const bg: ?*const image.Image = if (self.wall_ok and page.background_topic.len > 0 and
+            std.mem.eql(u8, page.background_topic, self.art_topic)) &self.wall else null;
         for (page.keys[0..content_kc], 0..) |*ka, i| {
             const v = self.keyView(arena, ka);
             var h = std.hash.Wyhash.init(self.page + 1);
             h.update(v.label);
             h.update(if (v.active) "1" else "0");
+            if (bg != null) h.update(std.mem.asBytes(&self.art_applied));
             const sig = h.final();
             if (sig == self.key_sigs[i]) continue;
-            try self.drawKey(arena, @intCast(i), v.label, ka.icon, ka.r, ka.g, ka.b, v.active);
+            try self.drawKey(arena, @intCast(i), v.label, ka.icon, ka.r, ka.g, ka.b, v.active, bg);
             self.key_sigs[i] = sig;
         }
         if (pageKeyIndex(self.model)) |pk| {
@@ -196,7 +242,7 @@ const Daemon = struct {
             h.update("pagekey");
             const sig = h.final();
             if (sig != self.key_sigs[pk]) {
-                try self.drawKey(arena, pk, page.name, "", page.r, page.g, page.b, true);
+                try self.drawKey(arena, pk, page.name, "", page.r, page.g, page.b, true, null);
                 self.key_sigs[pk] = sig;
             }
         }
@@ -243,10 +289,14 @@ const Daemon = struct {
     /// Draw one key's canvas: an icon file if configured (scaled to fit,
     /// alpha-blended, centered — falling back to the label if it fails to
     /// load), else the label text.
-    fn drawKey(self: *Daemon, arena: std.mem.Allocator, key: u8, label: []const u8, icon: []const u8, r: u8, g: u8, b: u8, active: bool) !void {
+    fn drawKey(self: *Daemon, arena: std.mem.Allocator, key: u8, label: []const u8, icon: []const u8, r: u8, g: u8, b: u8, active: bool, bg: ?*const image.Image) !void {
         const kpx = deck.keyPx(self.model);
         var img = try image.Image.init(arena, kpx, kpx);
         img.fill(r / 6, g / 6, b / 6);
+        if (bg) |wall| {
+            const cols: usize = deck.keyCount(self.model) / 2;
+            image.blitDim(&img, wall, (key % cols) * kpx, (key / cols) * kpx, 40);
+        }
         if (icon.len > 0) {
             image.drawIconFit(&img, icon) catch |err| {
                 std.debug.print("icon: {s} failed ({s}), falling back to label\n", .{ icon, @errorName(err) });
@@ -369,6 +419,16 @@ pub fn run(io: std.Io, dev: *hid.Device, model: deck.Model, cfg: *const config.C
         for (p.strip) |t| store.registerTemplate(t);
     }
 
+    var art_topic: []const u8 = "";
+    for (cfg.pages[0..cfg.page_count]) |*p| {
+        if (p.background_topic.len == 0) continue;
+        if (art_topic.len == 0) {
+            art_topic = p.background_topic;
+        } else if (!std.mem.eql(u8, art_topic, p.background_topic)) {
+            std.debug.print("config: only one background_topic is supported, ignoring {s}\n", .{p.background_topic});
+        }
+    }
+
     const session = try gpa.create(mqtt.Session);
     var d: Daemon = .{
         .dev = dev,
@@ -379,6 +439,12 @@ pub fn run(io: std.Io, dev: *hid.Device, model: deck.Model, cfg: *const config.C
         .session = session,
         .brightness = cfg.brightness,
     };
+    if (art_topic.len > 0) {
+        d.art_topic = art_topic;
+        d.art_buf = try gpa.alloc(u8, 192 * 1024);
+        const kpx = deck.keyPx(model);
+        d.wall = try image.Image.init(gpa, (deck.keyCount(model) / 2) * kpx, 2 * kpx);
+    }
     for (&d.dial_vals, 0..) |*row, pi| {
         for (row, 0..) |*v, di| v.* = (cfg.pages[pi].dials[di] orelse cfg.dials[di]).turn_start;
     }
@@ -391,6 +457,7 @@ pub fn run(io: std.Io, dev: *hid.Device, model: deck.Model, cfg: *const config.C
     try subs.append(gpa, d.page_set_topic);
     try subs.append(gpa, d.bright_set_topic);
     try subs.appendSlice(gpa, store.topics[0..store.count]);
+    if (art_topic.len > 0) try subs.append(gpa, art_topic);
 
     session.* = .{
         .io = io,
