@@ -12,7 +12,7 @@ module.exports = {
     {
       name: "deckd",
       script: "./zig/zig-out/bin/deckd",
-      args: ["run"], // matrix URL comes from ~/.config/deckd/config.json
+      args: ["run"], // broker and pages come from ~/.config/deckd/config.json
       cwd: __dirname,
       autorestart: true,
       restart_delay: 2000,

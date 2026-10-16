@@ -14,7 +14,7 @@
 pkgname=deckd
 pkgver=r15.6fc1b0c
 pkgrel=1
-pkgdesc="Elgato Stream Deck Plus daemon for matrix_sim, soma-zig, and MQTT — raw hidraw, no vendor SDK"
+pkgdesc="Elgato Stream Deck Plus daemon, config-driven over MQTT — raw hidraw, no vendor SDK"
 arch=('x86_64' 'aarch64')
 url="https://github.com/local/deckd-zig"
 license=('custom')

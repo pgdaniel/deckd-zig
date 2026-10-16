@@ -1,5 +1,5 @@
 [Unit]
-Description=deckd — Stream Deck Plus daemon (matrix + soma controller)
+Description=deckd — Stream Deck Plus daemon (MQTT controller)
 Documentation=https://github.com/local/deckd-zig
 # The deck's hidraw node gets its user ACL from logind's uaccess tag, so
 # this runs fine as an unprivileged user service in the desktop session.

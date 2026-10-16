@@ -9,9 +9,9 @@
 deckd: deckd (Elgato Stream Deck Plus daemon)
 deckd:
 deckd: deckd drives an Elgato Stream Deck Plus over raw hidraw (no vendor
-deckd: SDK) and turns it into a controller for matrix_sim (a HUB75 LED
-deckd: panel), soma-zig (a SomaFM terminal player), and a publish-only
-deckd: MQTT page for lights/home-automation. Written from scratch in Zig.
+deckd: SDK) and turns it into a config-driven MQTT controller: keys, dials
+deckd: and the touch strip publish topics and display subscribed ones.
+deckd: Written from scratch in Zig.
 deckd:
 deckd: Homepage: https://github.com/local/deckd-zig
 deckd:

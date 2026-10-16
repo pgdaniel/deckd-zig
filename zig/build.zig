@@ -58,10 +58,16 @@ pub fn build(b: *std.Build) void {
     // on servers with no GTK installed (see the udev rules' own comment on
     // that), so a missing gtk4 pkg-config file just skips this — it must
     // never break `zig build` for the daemon.
-    if (builtin.os.tag == .linux and pkgConfigHas(b, "gtk4")) {
-        buildConfigGui(b, target, optimize);
-    } else if (builtin.os.tag == .linux) {
-        std.debug.print("note: gtk4 not found (pkg-config) — skipping deckd-config GUI\n", .{});
+    //
+    // Opt-in (-Dconfig-gui) for now: it still edits the pre-MQTT schema
+    // (matrix_keys/soma_keys/mqtt_keys), which the daemon no longer reads.
+    const want_gui = b.option(bool, "config-gui", "Build deckd-config (GTK4; still on the old config schema)") orelse false;
+    if (want_gui) {
+        if (builtin.os.tag == .linux and pkgConfigHas(b, "gtk4")) {
+            buildConfigGui(b, target, optimize);
+        } else if (builtin.os.tag == .linux) {
+            std.debug.print("note: gtk4 not found (pkg-config) — skipping deckd-config GUI\n", .{});
+        }
     }
 }
 
