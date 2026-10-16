@@ -41,7 +41,8 @@
 //!
 //! Backgrounds: a page's `background_topic` names a topic whose message is
 //! an image (JPEG/PNG bytes, up to ~250 KB). It is center-cropped across the
-//! whole key grid and shown dimmed behind the labels/icons. An empty message
+//! whole device (the keys and the touch strip are one canvas) and shown dimmed
+//! behind the labels, icons and strip text. An empty message
 //! clears it. One background topic is supported per config.
 //!
 //! Key/dial/page lists patch by index. mqtt_host must be a literal IP (or

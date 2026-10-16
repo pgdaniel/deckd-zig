@@ -68,6 +68,12 @@ const Daemon = struct {
     art_applied: u32 = 0,
     wall: image.Image = undefined,
     wall_ok: bool = false,
+    // Geometry of `wall`: one canvas under the whole device. Key (c, r) shows
+    // the key-sized window centered in its slot (the gaps between the LCDs
+    // are skipped, as if the bezel covered them); the strip shows the band
+    // below the key rows.
+    wall_slot_w: usize = 0,
+    wall_slot_h: usize = 0,
 
     page_set_topic: []const u8 = "",
     bright_set_topic: []const u8 = "",
@@ -219,13 +225,17 @@ const Daemon = struct {
         return .{ .label = self.store.expand(arena, ka.label, self.pageCfg().name), .active = active };
     }
 
+    fn bgFor(self: *Daemon, page: *const config.Page) ?*const image.Image {
+        if (self.wall_ok and page.background_topic.len > 0 and std.mem.eql(u8, page.background_topic, self.art_topic)) return &self.wall;
+        return null;
+    }
+
     fn syncDisplay(self: *Daemon, arena: std.mem.Allocator) !void {
         const kc = deck.keyCount(self.model);
         const content_kc = if (pageKeyIndex(self.model)) |_| kc - 1 else kc;
         const page = self.pageCfg();
         self.refreshArt();
-        const bg: ?*const image.Image = if (self.wall_ok and page.background_topic.len > 0 and
-            std.mem.eql(u8, page.background_topic, self.art_topic)) &self.wall else null;
+        const bg = self.bgFor(page);
         for (page.keys[0..content_kc], 0..) |*ka, i| {
             const v = self.keyView(arena, ka);
             var h = std.hash.Wyhash.init(self.page + 1);
@@ -259,6 +269,8 @@ const Daemon = struct {
         var h = std.hash.Wyhash.init(self.page + 100);
         for (lines) |l| h.update(l);
         h.update(if (up) "1" else "0");
+        const bg = self.bgFor(page);
+        if (bg != null) h.update(std.mem.asBytes(&self.art_applied));
         const sig = h.final();
         if (sig == self.strip_sig) return;
 
@@ -266,6 +278,7 @@ const Daemon = struct {
         const sh = deck.stripH(self.model);
         var img = try image.Image.init(arena, sw, sh);
         img.fill(8, 8, 12);
+        if (bg) |wall| image.blitDim(&img, wall, 0, 2 * self.wall_slot_h, 40);
         if (unconfigured) {
             self.drawCenteredText(&img, "MQTT NOT CONFIGURED", 50, self.cfg.font_size_strip, 255, 60, 60);
         } else if (!up) {
@@ -295,7 +308,9 @@ const Daemon = struct {
         img.fill(r / 6, g / 6, b / 6);
         if (bg) |wall| {
             const cols: usize = deck.keyCount(self.model) / 2;
-            image.blitDim(&img, wall, (key % cols) * kpx, (key / cols) * kpx, 40);
+            const sx = (key % cols) * self.wall_slot_w + (self.wall_slot_w - kpx) / 2;
+            const sy = (key / cols) * self.wall_slot_h + (self.wall_slot_h - kpx) / 2;
+            image.blitDim(&img, wall, sx, sy, 40);
         }
         if (icon.len > 0) {
             image.drawIconFit(&img, icon) catch |err| {
@@ -442,8 +457,17 @@ pub fn run(io: std.Io, dev: *hid.Device, model: deck.Model, cfg: *const config.C
     if (art_topic.len > 0) {
         d.art_topic = art_topic;
         d.art_buf = try gpa.alloc(u8, 192 * 1024);
-        const kpx = deck.keyPx(model);
-        d.wall = try image.Image.init(gpa, (deck.keyCount(model) / 2) * kpx, 2 * kpx);
+        const kpx: usize = deck.keyPx(model);
+        const cols: usize = deck.keyCount(model) / 2;
+        if (deck.hasStrip(model)) {
+            d.wall_slot_w = deck.stripW(model) / cols;
+            d.wall_slot_h = kpx + 20;
+        } else {
+            d.wall_slot_w = kpx;
+            d.wall_slot_h = kpx;
+        }
+        const strip_h: usize = if (deck.hasStrip(model)) deck.stripH(model) else 0;
+        d.wall = try image.Image.init(gpa, cols * d.wall_slot_w, 2 * d.wall_slot_h + strip_h);
     }
     for (&d.dial_vals, 0..) |*row, pi| {
         for (row, 0..) |*v, di| v.* = (cfg.pages[pi].dials[di] orelse cfg.dials[di]).turn_start;

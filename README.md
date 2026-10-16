@@ -96,8 +96,9 @@ A key (`keys[i]`, up to 8 per page, patched by index):
 
 A page may set `"background_topic": "some/topic"`. That topic's message is an
 image (raw JPEG/PNG bytes, up to ~190 KB; an empty message clears it).
-deckd center-crops it across the whole key grid, so the keys act as one
-screen, and dims it behind the labels and icons. One background topic per
+deckd center-crops it across the whole device, keys and touch strip as one
+canvas (the gaps between the LCDs are skipped), and dims it behind the
+labels, icons and strip text. One background topic per
 config. Any publisher works; the Spotify bridge sends the album cover.
 
 ### Templates
