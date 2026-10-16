@@ -220,6 +220,18 @@ example config uses exactly these topics.
   state in `soma/state/{playing,channel,channel_id,track,volume}` and
   `soma/status`.
 
+- **Spotify** (`bridges/spotify-mqtt.py`, any Linux PC): a stdlib-only
+  script that bridges any MPRIS player (Spotify desktop, `spotifyd`) to MQTT
+  — needs only `python3` and systemd's `busctl`. Install one per PC:
+  `cp bridges/spotify-mqtt.py ~/.local/bin/spotify-mqtt`, put
+  `SPOTIFY_MQTT_HOST=<broker>` in `~/.config/spotify-mqtt.env`, and enable
+  `bridges/spotify-mqtt.service` as a user unit. Each PC publishes
+  `spotify/<hostname>/state/{playing,artist,track,album,volume}` and takes
+  commands on `spotify/<hostname>/{cmd,skip,vol/set,vol/adj}`. The *shared*
+  topics (`spotify/cmd`, `spotify/state/*`, ...) follow whichever PC is
+  playing (or played last), so one SPOTIFY page controls whichever machine
+  has music on; `spotify/state/host` says which. See the script header.
+
 ### Config GUI
 
 `deckd-config` (GTK4) still edits the old pre-MQTT schema and is **not built
@@ -275,7 +287,8 @@ the image into noise lines). 800×100 JPEG, no rotation needed.
 | `zig/src/daemon.zig` | event loop: input → publishes, topics → key/strip drawing |
 | `zig/src/main.zig` | CLI (`run` + dev commands) |
 | `zig/src/config_gui.zig` | `deckd-config` GTK4 editor (old schema; opt-in build) |
-| `examples/config.json` | MATRIX + SOMA pages for the companion projects |
+| `examples/config.json` | MATRIX, SOMA and SPOTIFY pages for the companion projects |
+| `bridges/` | `spotify-mqtt.py` (+ user unit): MPRIS <-> MQTT bridge, one per Linux PC |
 | `assets/icons/` | ready-made Phosphor icons, one per example key |
 | `tools/fetch-phosphor-icons.sh` | regenerates `assets/icons/` |
 | `systemd/deckd.service` | user service for running at login |

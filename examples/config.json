@@ -148,6 +148,64 @@
         "{soma/state/track}",
         "VOL {soma/state/volume}%"
       ]
+    },
+    {
+      "name": "SPOTIFY",
+      "color": "1ed760",
+      "keys": [
+        {
+          "label": "PREV",
+          "color": "b4b4b4",
+          "topic": "spotify/cmd",
+          "payload": "previous"
+        },
+        {
+          "label": "PLAY",
+          "color": "1ed760",
+          "topic": "spotify/cmd",
+          "payload": "play-pause",
+          "active_topic": "spotify/state/playing",
+          "active_value": "on"
+        },
+        {
+          "label": "NEXT",
+          "color": "b4b4b4",
+          "topic": "spotify/cmd",
+          "payload": "next"
+        },
+        {
+          "label": "VOL-",
+          "color": "78a0ff",
+          "topic": "spotify/vol/adj",
+          "payload": "-5"
+        },
+        {
+          "label": "VOL+",
+          "color": "78a0ff",
+          "topic": "spotify/vol/adj",
+          "payload": "5"
+        }
+      ],
+      "strip": [
+        "{spotify/state/track}",
+        "{spotify/state/artist}",
+        "VOL {spotify/state/volume}%  on {spotify/state/host}"
+      ],
+      "dials": [
+        {
+          "turn_topic": "spotify/vol/adj",
+          "turn_step": 5,
+          "press_topic": "spotify/cmd",
+          "press_payload": "play-pause"
+        },
+        {
+          "turn_topic": "spotify/skip",
+          "press_topic": "spotify/cmd",
+          "press_payload": "next"
+        },
+        null,
+        null
+      ]
     }
   ],
   "dials": [
