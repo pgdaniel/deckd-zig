@@ -282,7 +282,7 @@ test "buildConnect without auth" {
     var buf: [128]u8 = undefined;
     const pkt = try buildConnect(&buf, "deckd", "", "", null);
     try std.testing.expectEqualSlices(u8, &.{
-        0x10, 19, // remaining length
+        0x10, 17, // remaining length
         0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04, 0x02, 0x00, 0x3c,
         0x00, 0x05, 'd', 'e', 'c', 'k', 'd',
     }, pkt);
@@ -292,8 +292,8 @@ test "buildConnect with user/pass sets flags and appends them" {
     var buf: [128]u8 = undefined;
     const pkt = try buildConnect(&buf, "deckd", "u", "p", null);
     try std.testing.expectEqual(@as(u8, 0x10), pkt[0]);
-    try std.testing.expectEqual(@as(u8, 25), pkt[1]); // 19 + 2+1 + 2+1
-    try std.testing.expectEqual(@as(u8, 0xC2), pkt[12]); // clean | user | pass
+    try std.testing.expectEqual(@as(u8, 23), pkt[1]); // 17 + 2+1 + 2+1
+    try std.testing.expectEqual(@as(u8, 0xC2), pkt[9]); // clean | user | pass
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 0x01, 'u', 0x00, 0x01, 'p' }, pkt[pkt.len - 6 ..]);
 }
 
@@ -301,7 +301,7 @@ test "buildPublish" {
     var buf: [128]u8 = undefined;
     const pkt = try buildPublish(&buf, "a/b", "ON", false);
     try std.testing.expectEqualSlices(u8, &.{
-        0x30, 0x08, 0x00, 0x03, 'a', '/', 'b', 'O', 'N',
+        0x30, 0x07, 0x00, 0x03, 'a', '/', 'b', 'O', 'N',
     }, pkt);
 }
 

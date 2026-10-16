@@ -164,3 +164,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
         usage();
     }
 }
+
+test {
+    // Pull in the tests of modules main.zig doesn't otherwise reference.
+    _ = @import("mqtt.zig");
+    _ = @import("store.zig");
+    _ = @import("config.zig");
+    _ = @import("deck.zig");
+}
