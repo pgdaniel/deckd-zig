@@ -17,7 +17,7 @@ fn usage() noreturn {
         \\  deckd reset                 reset the device
         \\  deckd test-image            orientation test pattern on all keys (+ strip if present)
         \\  deckd pub <topic> <payload> publish one MQTT message (broker from config; no deck needed)
-        \\  deckd run [matrix-url]      daemon: keys/knobs drive the matrix (default http://localhost:8787)
+        \\  deckd run                   daemon: config-driven pages, everything over MQTT
         \\
     , .{});
     std.process.exit(2);
@@ -144,7 +144,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
         var cfg_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         const cfg = try cfg_arena.allocator().create(config.Config);
         cfg.* = config.load(cfg_arena.allocator(), d.model);
-        if (positional) |url| cfg.matrix_url = url;
         var io_threaded: std.Io.Threaded = .init_single_threaded;
         try daemon.run(io_threaded.io(), &d.dev, d.model, cfg);
     } else if (std.mem.eql(u8, cmd, "dump")) {
