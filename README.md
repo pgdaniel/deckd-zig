@@ -1,38 +1,33 @@
 # deckd-zig
 
 A Linux daemon for the **Elgato Stream Deck Plus**, written from scratch in
-Zig over raw hidraw — no libraries, no official SDK. It turns the deck into a
-controller for two local projects:
-
-- **[matrix_sim](../matrix_sim)** — the 64×32 HUB75 LED panel (via its HTTP
-  control API), and
-- **[soma-zig](../soma-zig)** — the SomaFM terminal player (via its Unix-socket
-  IPC).
-
-Plus a publish-only **MQTT** page: each key sends its configured
-topic/payload to a LAN broker, for lights or anything else that listens.
+Zig over raw hidraw — no libraries, no official SDK. It is a generic,
+config-driven **MQTT controller**: keys, knobs and the touch strip publish
+topics, and key faces, borders and strip text are drawn from topics it
+subscribes to. Nothing about any particular device is built in — matrix_sim,
+soma-zig, lights, whatever speaks MQTT, is wired up in `config.json`.
 
 Everything on the device works: the 8 LCD keys (120×120 JPEG each), the
-800×100 touch strip, and the 4 rotary encoder knobs (turn + push).
+800×100 touch strip, and the 4 rotary encoder knobs (turn + push). The
+6-key Stream Deck Mini is supported too (no strip, no knobs).
 
 ## Building
 
-Pinned to zig 0.16.0 (see `.tool-versions`; matches soma-zig):
+Pinned to zig 0.16.0 (see `.tool-versions`):
 
 ```
 cd zig
-zig build          # produces zig-out/bin/deckd (+ deckd-config if gtk4 is found)
-zig build test     # protocol parser tests (built from real captured bytes)
+zig build          # produces zig-out/bin/deckd
+zig build test     # protocol parser, MQTT packet, store and config tests
 ```
 
 Vendored: `stb_image_write.h` for JPEG encoding (keys/strip only accept JPEG),
-`stb_image.h` for decoding icon files (see `icon` in Configuration below).
+`stb_image.h` for decoding icon files, `stb_truetype.h` for fonts.
 
 ## Running
 
 ```
 deckd run                          # uses ~/.config/deckd/config.json
-deckd run http://192.168.1.109:8787   # CLI URL beats the config file
 ```
 
 The device is auto-discovered by scanning `/sys/class/hidraw/*/device/uevent`
@@ -40,42 +35,87 @@ for VID `0fd9` / PID `0084`; `--device /dev/hidrawN` overrides. Your user needs
 rw on the hidraw node (logind's `uaccess` tag usually covers the active
 session; otherwise a udev rule).
 
-The daemon polls the matrix and soma every 2 s and redraws only when what the
-deck shows actually changes (signature-driven), so it's quiet when idle. The
-matrix being unreachable shows `MATRIX OFFLINE` on the strip instead of
-killing the daemon; same for `SOMA OFFLINE`.
+The broker connection is persistent and reconnects forever; while it's down
+the strip shows `MQTT OFFLINE` and presses are logged and dropped. The
+display only redraws what changed (per-key and strip signatures), so it's
+quiet when idle.
 
 ## Configuration
 
-`~/.config/deckd/config.json` — everything is optional and falls back to the
-defaults in `zig/src/config.zig`:
+`~/.config/deckd/config.json` — everything is optional. See
+[`examples/config.json`](examples/config.json) for a full one (a MATRIX page
+and a SOMA page driving [matrix_sim](../matrix_sim) and
+[soma-zig](../soma-zig)).
 
 ```json
 {
-  "matrix_url": "http://192.168.1.109:8787",
-  "brightness": 80,
-  "font_path": "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Bold.ttf",
-  "font_size_key": 22,
-  "font_size_strip": 30,
-  "matrix_keys": [ { "label": "WEATHER", "screen": "weather-cyberpunk", "color": "ff8c00", "icon": "/home/me/deckd-zig/assets/icons/weather.png" } ],
-  "soma_keys":   [ { "label": "GROOVE",  "id": "groovesalad",        "color": "78dc78", "icon": "/home/me/deckd-zig/assets/icons/groove.png" } ],
   "mqtt_host": "192.168.1.10",
   "mqtt_port": 1883,
-  "mqtt_user": "",
-  "mqtt_pass": "",
-  "mqtt_keys": [ { "label": "LT ON", "topic": "home/lights/set", "payload": "ON", "color": "ffc850", "icon": "/home/me/deckd-zig/assets/icons/office.png" } ]
+  "mqtt_user": "", "mqtt_pass": "",
+  "topic_prefix": "deckd",
+  "brightness": 80,
+  "font_path": "/usr/share/fonts/TTF/JetBrainsMonoNerdFontMono-Bold.ttf",
+  "font_size_key": 22, "font_size_strip": 30,
+  "pages": [
+    { "name": "LIGHTS", "color": "ffc850",
+      "keys": [
+        { "label": "LT ON", "color": "ffc850",
+          "topic": "home/lights/set", "payload": "ON",
+          "active_topic": "home/lights/state", "active_value": "ON" },
+        { "label": "{home/temp}C", "color": "64a0ff" }
+      ],
+      "strip": [ "{@page}", "lights: {home/lights/state}" ],
+      "dials": [ null, null, { "turn_topic": "home/dimmer", "turn_mode": "value",
+                                "turn_min": 0, "turn_max": 100, "turn_step": 5 } ]
+    }
+  ],
+  "dials": [ null, null, null, { "turn_action": "brightness", "press_action": "page" } ]
 }
 ```
 
-Key lists patch the default 8-key maps **by index**; an entry may set just the
-fields it changes. Soma keys take any SomaFM channel id plus the special ids
-`viz` and `stop`. MQTT keys publish `payload` to `topic` when pressed — an
-empty `topic` makes the key inert. `mqtt_host` must be a literal IP (or
-`localhost`); no DNS, no TLS — LAN brokers only. `mqtt_user`/`mqtt_pass` are
-optional. Knob roles are not configurable yet.
+`mqtt_host` must be a literal IP (or `localhost`); no DNS, no TLS — LAN
+brokers only. With no config at all you get one blank page whose only live
+controls are knob 4 (brightness / page).
 
-Each key entry also takes an `"icon"` (absolute path, no `~` expansion — same
-convention as `font_path`): when set, it's drawn on the key (scaled to fit,
+### Pages and keys
+
+`pages` (up to 8) each swap what the keys and strip show; cycle them with a
+dial's `press_action: "page"` (knob 4 by default) or by publishing to
+`<prefix>/page/set`. On the Mini, which has no knobs, the last key is
+reserved as the page button.
+
+A key (`keys[i]`, up to 8 per page, patched by index):
+
+| Field | Meaning |
+|---|---|
+| `label`, `icon`, `color` | face: text (a template), or an icon file, on a dim `color` background |
+| `topic`, `payload`, `retain` | published when pressed; empty `topic` = publish nothing |
+| `active_topic`, `active_value` | white border while that topic's latest message equals the value (empty value = `ON`/`1`/`true`) |
+
+### Templates
+
+`label` and each of a page's `strip` lines (up to 3: a large line, then two
+small ones) may contain `{some/topic}`, replaced by that topic's latest
+message (`-` until one arrives). `{@page}` is the current page name. deckd
+subscribes to every topic it finds in the config. Retained messages make
+state show up immediately on connect.
+
+### Dials
+
+A dial (`dials[i]`, global; a page's own `dials[i]` replaces it while that
+page shows, `null` = keep the global one):
+
+| Field | Meaning |
+|---|---|
+| `turn_topic`, `turn_step` | each click publishes there |
+| `turn_mode` | `"delta"` (default): payload is `turn_step × clicks`, signed. `"value"`: a running total from `turn_start`, clamped to `turn_min`..`turn_max` |
+| `press_topic`, `press_payload` | published on push |
+| `turn_action` / `press_action` | built-ins instead of topics: `"brightness"` / `"page"` |
+
+Swiping the strip and every raw input are also published — see below.
+
+Icons: a key's `"icon"` is an absolute path (no `~` expansion — same
+convention as `font_path`); when set, it's drawn on the key (scaled to fit,
 alpha-blended, centered) instead of the label.
 
 - **Format**: PNG, JPEG, BMP, or GIF. Use PNG for a transparent background —
@@ -89,25 +129,14 @@ alpha-blended, centered) instead of the label.
 - The source file is read into a fixed 1 MiB buffer — plenty for an icon,
   but a larger file is rejected outright rather than truncated.
 
-`assets/icons/` has one ready-made icon per key in the defaults above (from
+`assets/icons/` has ready-made icons for the keys in `examples/config.json` (from
 [Phosphor Icons](https://phosphoricons.com), MIT-licensed — bold weight,
-white on transparent, 256×256), which the sample config below already
-points at. `tools/fetch-phosphor-icons.sh` regenerates them and documents
+white on transparent, 256×256) — add an `"icon": "/abs/path/to/assets/icons/x.png"`
+to a key to use one. `tools/fetch-phosphor-icons.sh` regenerates them and documents
 the exact icon chosen for each key (and why, where nothing was a literal
 match) — re-run it if you change the mapping. It needs `curl` and
 `rsvg-convert` and fetches from `raw.githubusercontent.com` — it's a
 maintainer tool, not part of `zig build`.
-
-### Config GUI
-
-`zig-out/bin/deckd-config` — a standalone GTK4 app for editing
-`config.json` without hand-writing JSON: every field above, all 8 possible
-key slots per array (a Mini/Plus toggle just dims the ones a 6-key Mini
-ignores — it never discards them), a color picker, and a file picker for
-`icon`. Entirely independent of the daemon; it shares nothing but the
-on-disk schema. Only built when `pkg-config --exists gtk4` succeeds —
-skipped (with a note, not a failure) on a headless build with no GTK. Saving
-keeps one rotating `.bak` of whatever it overwrites.
 
 ### Fonts
 
@@ -152,58 +181,50 @@ processes share the hidraw node and fight over the deck
 `packaging/` has a PKGBUILD (Arch) and a SlackBuild (Slackware), both
 building straight from a git checkout — see `packaging/README.md`.
 
-## Controls
+## Topics
 
-**Knob 4 push cycles pages: MATRIX → SOMA → MIRROR → MQTT.** Knob roles are fixed
-on all pages:
+Published under `topic_prefix` (default `deckd`), QoS 0:
 
-| Knob | Rotate | Push |
-|---|---|---|
-| 1 (leftmost) | soma volume ±5% | mute toggle |
-| 2 | soma channel surf | play/stop toggle |
-| 3 | matrix screen jog | **auto-advance toggle** |
-| 4 | deck LCD brightness ±5% | **switch page** |
+| Topic | Payload |
+|---|---|
+| `deckd/status` | `online` / `offline` (retained; `offline` is the last-will) |
+| `deckd/page` | current page name (retained) |
+| `deckd/key/<n>` | `press` (n is 0-based, any page) |
+| `deckd/dial/<n>/turn` | signed click count |
+| `deckd/dial/<n>/press` | `press` |
+| `deckd/strip/swipe` | `left` / `right` |
+| `deckd/strip/tap` | `x,y` |
 
-Swiping left/right on the touch strip also jogs matrix screens.
+Subscribed control topics:
 
-### MATRIX page
+| Topic | Effect |
+|---|---|
+| `deckd/page/set` | switch page by name or 0-based index |
+| `deckd/brightness/set` | 0-100 |
 
-Keys jump straight to a screen (`POST /screen/<name>`); the active screen's
-key gets a white border:
+Plus whatever topics your config's templates and `active_topic`s mention.
 
-| WEATHER | HIGH | CLOCK | AQI | HUMID | SPECTR | SCOPE | MSG |
-|---|---|---|---|---|---|---|---|
-| weather-cyberpunk | high-temp-cyberpunk | clock-cyberpunk | aqi-cyberpunk | humidity-cyberpunk | spectrum | oscope | message |
+### Companion projects
 
-Strip: current screen name, `AUTO ON/OFF`, and the soma now-playing line when
-music is playing.
+Both of these publish retained state and accept commands over MQTT; the
+example config uses exactly these topics.
 
-### SOMA page
+- **[matrix_sim](../matrix_sim)** (`mqtt_control.py`, device name `display1`):
+  `display1/<screen>` switches screen, `display1/next`, `display1/auto`
+  (`on`/`off`/`toggle`), `display1/message`; state in
+  `display1/state/screen`, `display1/state/auto`, `display1/state/screens`.
+- **[soma-zig](../soma-zig)** (set `SOMA_MQTT_HOST`, optionally
+  `SOMA_MQTT_PORT`/`_USER`/`_PASS`/`_TOPIC`): `soma/cmd` takes any soma
+  command line (`play groovesalad`, `toggle`, `mute`, `viz next`, ...),
+  `soma/vol/set`, `soma/vol/adj` and `soma/surf` suit a dial's `turn_topic`;
+  state in `soma/state/{playing,channel,channel_id,track,volume}` and
+  `soma/status`.
 
-Keys are SomaFM channel presets (border = the one playing), plus VIZ (cycles
-the visualizer pattern) and STOP:
+### Config GUI
 
-| GROOVE | DRONE | DEFCON | AGENT | LUSH | DEEP | VIZ | STOP |
-|---|---|---|---|---|---|---|---|
-| groovesalad | dronezone | defcon | secretagent | lush | deepspaceone | — | — |
-
-Strip: channel name (or `SOMA (stopped)`), current track, `VOL n%`.
-
-### MIRROR page
-
-The strip shows the **live matrix framebuffer** (64×32, integer-scaled and
-centered), streamed from matrix_server's WebSocket broadcast on port 8888 —
-the same feed `led-matrix-simulator.html` uses. Redraws are throttled to ~4
-fps. Keys behave like the MATRIX page, so you can switch screens while
-watching the mirror.
-
-### MQTT page
-
-Keys publish their configured topic/payload to the broker (QoS 0, one
-connection per press) — lights, switches, scripts, anything that subscribes.
-No per-key state readback (publish-only), so no active border. Strip: broker
-host and the last published `topic = payload`; `MQTT OFFLINE` if the last
-publish failed, `MQTT NOT CONFIGURED` until `mqtt_host` is set.
+`deckd-config` (GTK4) still edits the old pre-MQTT schema and is **not built
+by default** (`zig build -Dconfig-gui=true` builds it); a rewrite for pages
+is on the backlog. Edit `config.json` by hand for now.
 
 ## Dev CLI
 
@@ -239,42 +260,29 @@ byte 2 = payload length:
 — note **page before length** (swapped vs. keys; getting this wrong garbles
 the image into noise lines). 800×100 JPEG, no rotation needed.
 
-## Interfaces it depends on
-
-- **matrix_sim control server** (`:8787`): `GET /screen`, `GET/POST /config`,
-  `POST /screen/<name>` (direct select, added for this project),
-  `POST /next-screen`.
-- **soma-zig IPC** (`$XDG_RUNTIME_DIR/soma.sock`, line-based):
-  `status` → one-line JSON `{"playing","connecting","channel","channel_id","track","volume"}`;
-  commands `vol N | vol ±N`, `mute`, `play [id]`, `stop`, `toggle`,
-  `next`/`prev` (selection), `surf-next`/`surf-prev` (selection + play),
-  `viz next`. Replies are one line (`ok` / `err ...`).
-- **MQTT broker** (outbound TCP, default port 1883): MQTT 3.1.1, publish-only,
-  QoS 0, optional username/password — implemented from scratch in `mqtt.zig`.
-
 ## Files
 
 | File | Purpose |
 |---|---|
 | `zig/src/hid.zig` | hidraw open/discovery, feature reports, report I/O |
 | `zig/src/deck.zig` | wire protocol: image upload, input parsing (+ tests) |
-| `zig/src/image.zig` | RGB framebuffer → JPEG (stb_image_write) |
+| `zig/src/image.zig` | RGB framebuffer → JPEG (stb_image_write), icon loading |
 | `zig/src/render.zig` | text/shape drawing (`font8x8.zig`, public-domain 8×8 font) |
-| `zig/src/matrix.zig` | matrix_sim HTTP control client |
-| `zig/src/soma.zig` | soma-zig IPC client |
-| `zig/src/mqtt.zig` | publish-only MQTT 3.1.1 client (QoS 0, no TLS) |
-| `zig/src/ws.zig` | WebSocket client for the matrix framebuffer stream |
-| `zig/src/config.zig` | `~/.config/deckd/config.json` loading + default key maps |
-| `zig/src/daemon.zig` | pages, knob wiring, strip layouts, main loop |
+| `zig/src/ttf.zig` | TrueType text via stb_truetype |
+| `zig/src/mqtt.zig` | MQTT 3.1.1 client: long-lived `Session` + one-shot publish (QoS 0, no TLS) |
+| `zig/src/store.zig` | latest message per topic + `{topic}` template expansion |
+| `zig/src/config.zig` | `~/.config/deckd/config.json` loading (pages, keys, dials) |
+| `zig/src/daemon.zig` | event loop: input → publishes, topics → key/strip drawing |
 | `zig/src/main.zig` | CLI (`run` + dev commands) |
-| `zig/src/config_gui.zig` | `deckd-config`: standalone GTK4 config.json editor |
-| `zig/tools/gen_gtk_header.sh` | flattens the system's gtk/gtk.h for `deckd-config`'s `@cImport` |
-| `assets/icons/` | ready-made Phosphor icons, one per default key |
-| `tools/fetch-phosphor-icons.sh` | regenerates `assets/icons/` (key → icon mapping documented inline) |
+| `zig/src/config_gui.zig` | `deckd-config` GTK4 editor (old schema; opt-in build) |
+| `examples/config.json` | MATRIX + SOMA pages for the companion projects |
+| `assets/icons/` | ready-made Phosphor icons, one per example key |
+| `tools/fetch-phosphor-icons.sh` | regenerates `assets/icons/` |
 | `systemd/deckd.service` | user service for running at login |
-| `packaging/` | PKGBUILD (Arch) and SlackBuild (Slackware) for deploying to other servers |
+| `packaging/` | PKGBUILD (Arch) and SlackBuild (Slackware) |
 
 ## Backlog
 
-- Configurable knob roles (currently hardcoded)
+- Rewrite `deckd-config` for the pages schema
+- DNS for `mqtt_host`, TLS
 - Per-band auto-gain in soma-zig's visualizer (high bands read low)

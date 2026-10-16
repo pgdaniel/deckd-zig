@@ -1,0 +1,176 @@
+{
+  "mqtt_host": "192.168.1.10",
+  "mqtt_port": 1883,
+  "brightness": 80,
+  "pages": [
+    {
+      "name": "MATRIX",
+      "color": "00dcff",
+      "keys": [
+        {
+          "label": "WEATHER",
+          "color": "ff8c00",
+          "topic": "display1/weather-cyberpunk",
+          "payload": "x",
+          "active_topic": "display1/state/screen",
+          "active_value": "weather-cyberpunk"
+        },
+        {
+          "label": "HIGH",
+          "color": "ffdc00",
+          "topic": "display1/high-temp-cyberpunk",
+          "payload": "x",
+          "active_topic": "display1/state/screen",
+          "active_value": "high-temp-cyberpunk"
+        },
+        {
+          "label": "CLOCK",
+          "color": "00dcff",
+          "topic": "display1/clock-cyberpunk",
+          "payload": "x",
+          "active_topic": "display1/state/screen",
+          "active_value": "clock-cyberpunk"
+        },
+        {
+          "label": "AQI",
+          "color": "00dc64",
+          "topic": "display1/aqi-cyberpunk",
+          "payload": "x",
+          "active_topic": "display1/state/screen",
+          "active_value": "aqi-cyberpunk"
+        },
+        {
+          "label": "HUMID",
+          "color": "3c78ff",
+          "topic": "display1/humidity-cyberpunk",
+          "payload": "x",
+          "active_topic": "display1/state/screen",
+          "active_value": "humidity-cyberpunk"
+        },
+        {
+          "label": "SPECTR",
+          "color": "ff00dc",
+          "topic": "display1/spectrum",
+          "payload": "x",
+          "active_topic": "display1/state/screen",
+          "active_value": "spectrum"
+        },
+        {
+          "label": "SCOPE",
+          "color": "ff3c78",
+          "topic": "display1/oscope",
+          "payload": "x",
+          "active_topic": "display1/state/screen",
+          "active_value": "oscope"
+        },
+        {
+          "label": "MSG",
+          "color": "dcdcdc",
+          "topic": "display1/message",
+          "payload": "x",
+          "active_topic": "display1/state/screen",
+          "active_value": "message"
+        }
+      ],
+      "strip": [
+        "{display1/state/screen}",
+        "AUTO {display1/state/auto}",
+        "{soma/state/channel} - {soma/state/track}"
+      ]
+    },
+    {
+      "name": "SOMA",
+      "color": "78dc78",
+      "keys": [
+        {
+          "label": "GROOVE",
+          "color": "78dc78",
+          "topic": "soma/cmd",
+          "payload": "play groovesalad",
+          "active_topic": "soma/state/channel_id",
+          "active_value": "groovesalad"
+        },
+        {
+          "label": "DRONE",
+          "color": "64a0ff",
+          "topic": "soma/cmd",
+          "payload": "play dronezone",
+          "active_topic": "soma/state/channel_id",
+          "active_value": "dronezone"
+        },
+        {
+          "label": "DEFCON",
+          "color": "ff5050",
+          "topic": "soma/cmd",
+          "payload": "play defcon",
+          "active_topic": "soma/state/channel_id",
+          "active_value": "defcon"
+        },
+        {
+          "label": "AGENT",
+          "color": "dcb4ff",
+          "topic": "soma/cmd",
+          "payload": "play secretagent",
+          "active_topic": "soma/state/channel_id",
+          "active_value": "secretagent"
+        },
+        {
+          "label": "LUSH",
+          "color": "ffa0c8",
+          "topic": "soma/cmd",
+          "payload": "play lush",
+          "active_topic": "soma/state/channel_id",
+          "active_value": "lush"
+        },
+        {
+          "label": "DEEP",
+          "color": "8cf0f0",
+          "topic": "soma/cmd",
+          "payload": "play deepspaceone",
+          "active_topic": "soma/state/channel_id",
+          "active_value": "deepspaceone"
+        },
+        {
+          "label": "VIZ",
+          "color": "ffdc64",
+          "topic": "soma/cmd",
+          "payload": "viz next"
+        },
+        {
+          "label": "STOP",
+          "color": "ff3c3c",
+          "topic": "soma/cmd",
+          "payload": "stop"
+        }
+      ],
+      "strip": [
+        "{soma/state/channel}",
+        "{soma/state/track}",
+        "VOL {soma/state/volume}%"
+      ]
+    }
+  ],
+  "dials": [
+    {
+      "turn_topic": "soma/vol/adj",
+      "turn_step": 5,
+      "press_topic": "soma/cmd",
+      "press_payload": "mute"
+    },
+    {
+      "turn_topic": "soma/surf",
+      "press_topic": "soma/cmd",
+      "press_payload": "toggle"
+    },
+    {
+      "turn_topic": "display1/next",
+      "press_topic": "display1/auto",
+      "press_payload": "toggle"
+    },
+    {
+      "turn_action": "brightness",
+      "turn_step": 5,
+      "press_action": "page"
+    }
+  ]
+}
