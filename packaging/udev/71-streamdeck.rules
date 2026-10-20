@@ -1,4 +1,5 @@
-# Elgato Stream Deck Plus (VID 0fd9 / PID 0084) and Mini (PID 00b8) —
+# Elgato Stream Deck Plus (VID 0fd9 / PID 0084), Mini (PID 00b8) and the
+# 15-key original V2 (PID 006d) / MK.2 (PID 0080) —
 # hidraw access for deckd.
 #
 # `uaccess` covers the common desktop case: logind tags the node for the
@@ -9,3 +10,5 @@
 #   usermod -aG input <user>
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0fd9", ATTRS{idProduct}=="0084", MODE="0660", GROUP="input", TAG+="uaccess"
 SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0fd9", ATTRS{idProduct}=="00b8", MODE="0660", GROUP="input", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0fd9", ATTRS{idProduct}=="006d", MODE="0660", GROUP="input", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0fd9", ATTRS{idProduct}=="0080", MODE="0660", GROUP="input", TAG+="uaccess"

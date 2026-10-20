@@ -1,26 +1,41 @@
 //! Stream Deck protocol: constants, feature commands, image upload,
-//! input event parsing. Supports the Plus (8 keys + strip + dials) and
-//! the Mini (6 keys, no strip, no dials).
+//! input event parsing. Supports the Plus (8 keys + strip + dials), the
+//! Mini (6 keys, no strip, no dials) and the 15-key "original V2" / MK.2
+//! (5x3 keys, no strip, no dials).
 const std = @import("std");
 const hid = @import("hid.zig");
 const image = @import("image.zig");
 
-pub const Model = enum { plus, mini };
+pub const Model = enum { plus, mini, v2 };
 
-pub const max_keys = 8;
+pub const max_keys = 15;
 pub const max_dials = 4;
 
 pub fn keyCount(model: Model) u8 {
     return switch (model) {
         .plus => 8,
         .mini => 6,
+        .v2 => 15,
     };
+}
+
+/// Key grid shape (row-major key numbering, key 0 top-left).
+pub fn keyCols(model: Model) u8 {
+    return switch (model) {
+        .plus => 4,
+        .mini => 3,
+        .v2 => 5,
+    };
+}
+
+pub fn keyRows(model: Model) u8 {
+    return keyCount(model) / keyCols(model);
 }
 
 pub fn dialCount(model: Model) u8 {
     return switch (model) {
         .plus => 4,
-        .mini => 0,
+        .mini, .v2 => 0,
     };
 }
 
@@ -28,41 +43,41 @@ pub fn keyPx(model: Model) u16 {
     return switch (model) {
         .plus => 120,
         .mini => 80,
+        .v2 => 72,
     };
 }
 
 pub fn hasStrip(model: Model) bool {
     return switch (model) {
         .plus => true,
-        .mini => false,
+        .mini, .v2 => false,
     };
 }
 
 pub fn stripW(model: Model) u16 {
     return switch (model) {
         .plus => 800,
-        .mini => 0,
+        .mini, .v2 => 0,
     };
 }
 
 pub fn stripH(model: Model) u16 {
     return switch (model) {
         .plus => 100,
-        .mini => 0,
+        .mini, .v2 => 0,
     };
 }
 
 pub fn featureLen(model: Model) u16 {
     return switch (model) {
-        .plus => 32,
+        .plus, .v2 => 32,
         .mini => 17,
     };
 }
 
 pub fn reportLen(model: Model) u16 {
     return switch (model) {
-        .plus => 1024,
-        .mini => 1024,
+        .plus, .mini, .v2 => 1024,
     };
 }
 
@@ -89,6 +104,7 @@ pub fn parseReport(model: Model, report: []const u8) ?Report {
     return switch (model) {
         .plus => parseReportPlus(report),
         .mini => parseReportMini(report),
+        .v2 => parseReportV2(report),
     };
 }
 
@@ -139,6 +155,15 @@ fn parseReportMini(report: []const u8) ?Report {
     if (report.len < 7 or report[0] != 0x01) return null;
     var states: [max_keys]bool = .{false} ** max_keys;
     for (states[0..6], report[1..7]) |*s, b| s.* = b != 0;
+    return .{ .keys = states };
+}
+
+/// 15-key V2 input: byte 0 = 0x01, a 3-byte header, then one u8 state per
+/// key at [4..19] (1 = pressed), same shape as the Plus key report.
+fn parseReportV2(report: []const u8) ?Report {
+    if (report.len < 4 + 15 or report[0] != 0x01) return null;
+    var states: [max_keys]bool = .{false} ** max_keys;
+    for (states[0..15], report[4 .. 4 + 15]) |*s, b| s.* = b != 0;
     return .{ .keys = states };
 }
 
@@ -205,6 +230,19 @@ test "parse swipe" {
     try std.testing.expectEqual(Point{ .x = 214, .y = 45 }, r.touch_swipe.to);
 }
 
+test "parse v2 key state" {
+    const r = parseReportV2(&testReportPlus("01 00 0f 00 00 00 01 00 00 00 00 00 00 00 00 00 00 00 01")).?;
+    try std.testing.expect(r.keys[2] and r.keys[14] and !r.keys[0]);
+}
+
+test "rotated180 reverses pixel order" {
+    var px = [_]u8{ 1, 2, 3, 4, 5, 6 };
+    var out: [6]u8 = undefined;
+    const src: image.Image = .{ .w = 2, .h = 1, .px = &px };
+    const r = rotated180(&out, &src);
+    try std.testing.expectEqualSlices(u8, &.{ 4, 5, 6, 1, 2, 3 }, r.px);
+}
+
 test "parse mini key state" {
     const r = parseReportMini(&testReportMini("01 00 01 00 01 00 01")).?;
     try std.testing.expectEqual([6]bool{ false, true, false, true, false, true }, r.keys[0..6].*);
@@ -215,7 +253,7 @@ test "parse mini key state" {
 pub fn reset(model: Model, dev: *hid.Device) !void {
     var buf: [32]u8 = std.mem.zeroes([32]u8);
     switch (model) {
-        .plus => {
+        .plus, .v2 => {
             buf[0] = 0x03;
             buf[1] = 0x02;
             try dev.setFeature(buf[0..32]);
@@ -231,7 +269,7 @@ pub fn reset(model: Model, dev: *hid.Device) !void {
 pub fn setBrightness(model: Model, dev: *hid.Device, percent: u8) !void {
     var buf: [32]u8 = std.mem.zeroes([32]u8);
     switch (model) {
-        .plus => {
+        .plus, .v2 => {
             buf[0] = 0x03;
             buf[1] = 0x08;
             buf[2] = @min(percent, 100);
@@ -251,7 +289,7 @@ pub fn setBrightness(model: Model, dev: *hid.Device, percent: u8) !void {
 
 pub fn firmwareVersion(model: Model, dev: *hid.Device, buf: []u8) ![]const u8 {
     switch (model) {
-        .plus => {
+        .plus, .v2 => {
             try dev.getFeature(0x05, buf[0..featureLen(model)]);
             return std.mem.sliceTo(buf[6..], 0);
         },
@@ -264,7 +302,7 @@ pub fn firmwareVersion(model: Model, dev: *hid.Device, buf: []u8) ![]const u8 {
 
 pub fn serialNumber(model: Model, dev: *hid.Device, buf: []u8) ![]const u8 {
     switch (model) {
-        .plus => {
+        .plus, .v2 => {
             try dev.getFeature(0x06, buf[0..featureLen(model)]);
             return std.mem.sliceTo(buf[2..], 0);
         },
@@ -277,11 +315,25 @@ pub fn serialNumber(model: Model, dev: *hid.Device, buf: []u8) ![]const u8 {
     }
 }
 
-/// Upload an image to a key. For Plus: JPEG, 120x120. For Mini: BMP, 80x80,
+/// Pixel-reversed (180° rotated) copy of img in buf.
+fn rotated180(buf: []u8, img: *const image.Image) image.Image {
+    const n = img.w * img.h;
+    var i: usize = 0;
+    while (i < n) : (i += 1) @memcpy(buf[i * 3 ..][0..3], img.px[(n - 1 - i) * 3 ..][0..3]);
+    return .{ .w = img.w, .h = img.h, .px = buf[0 .. n * 3] };
+}
+
+/// Upload an image to a key. For Plus: JPEG, 120x120. For V2: JPEG, 72x72,
+/// rotated 180°. For Mini: BMP, 80x80,
 /// BGR, bottom-up, horizontally mirrored.
 pub fn setKeyImage(model: Model, dev: *hid.Device, key: u8, img: *const image.Image) !void {
     switch (model) {
         .plus => try setKeyImagePlus(dev, key, img),
+        .v2 => {
+            // Same packets as the Plus, but 72x72 and mounted upside down.
+            var buf: [72 * 72 * 3]u8 = undefined;
+            try setKeyImagePlus(dev, key, &rotated180(&buf, img));
+        },
         .mini => try setKeyImageMini(dev, key, img),
     }
 }

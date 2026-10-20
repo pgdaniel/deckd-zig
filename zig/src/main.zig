@@ -32,7 +32,7 @@ fn openDeck(device_arg: ?[]const u8) !struct { dev: hid.Device, model: deck.Mode
         if (found) |info| {
             break :blk .{ info.path[0..info.path_len], info.model };
         }
-        std.debug.print("no Stream Deck found (vid 0fd9, pid 0084 or 00b8)\n", .{});
+        std.debug.print("no Stream Deck found (vid 0fd9, pid 0084, 00b8, 006d or 0080)\n", .{});
         std.process.exit(1);
     };
     std.debug.print("device: {s} ({s})\n", .{ path, @tagName(model) });
@@ -99,9 +99,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
             img.fillRect(0, 0, kpx, 6, 255, 255, 255); // top white bar
             var s: usize = 0;
             const bar_y: usize = if (kpx >= 120) 100 else 60;
-            const bar_x0: usize = if (kpx >= 120) 30 else 20;
-            const bar_step: usize = if (kpx >= 120) 12 else 8;
-            while (s <= key) : (s += 1) img.fillRect(bar_x0 + s * bar_step, bar_y, 8, 16, 255, 255, 255);
+            const dense = kc > 8; // 15-key V2: narrower bars so up to 15 fit in 72 px
+            const bar_x0: usize = if (kpx >= 120) 30 else if (dense) 8 else 20;
+            const bar_step: usize = if (kpx >= 120) 12 else if (dense) 4 else 8;
+            const bar_w: usize = if (dense) 3 else 8;
+            while (s <= key) : (s += 1) img.fillRect(bar_x0 + s * bar_step, bar_y, bar_w, if (dense) 8 else 16, 255, 255, 255);
             try deck.setKeyImage(d.model, &d.dev, key, &img);
             std.debug.print("key {d}: {d}x{d}\n", .{ key, kpx, kpx });
         }

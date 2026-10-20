@@ -9,7 +9,9 @@ soma-zig, lights, whatever speaks MQTT, is wired up in `config.json`.
 
 Everything on the device works: the 8 LCD keys (120×120 JPEG each), the
 800×100 touch strip, and the 4 rotary encoder knobs (turn + push). The
-6-key Stream Deck Mini is supported too (no strip, no knobs).
+6-key Stream Deck Mini and the 15-key (5×3) Stream Deck original V2 / MK.2
+are supported too (no strip, no knobs). deckd drives one deck at a time and
+detects the model by USB id (Plus `0084`, Mini `00b8`, V2 `006d`, MK.2 `0080`).
 
 ## Building
 
@@ -31,7 +33,7 @@ deckd run                          # uses ~/.config/deckd/config.json
 ```
 
 The device is auto-discovered by scanning `/sys/class/hidraw/*/device/uevent`
-for VID `0fd9` / PID `0084`; `--device /dev/hidrawN` overrides. Your user needs
+for VID `0fd9` and a supported PID (see above); `--device /dev/hidrawN` overrides. Your user needs
 rw on the hidraw node (logind's `uaccess` tag usually covers the active
 session; otherwise a udev rule).
 
@@ -81,10 +83,11 @@ controls are knob 4 (brightness / page).
 
 `pages` (up to 8) each swap what the keys and strip show; cycle them with a
 dial's `press_action: "page"` (knob 4 by default) or by publishing to
-`<prefix>/page/set`. On the Mini, which has no knobs, the last key is
-reserved as the page button.
+`<prefix>/page/set`. On models without knobs (the Mini and the
+15-key V2), the last key is reserved as the page button.
 
-A key (`keys[i]`, up to 8 per page, patched by index):
+A key (`keys[i]`, up to 15 per page, numbered row by row from the top left,
+patched by index; slots beyond your deck's key count are ignored):
 
 | Field | Meaning |
 |---|---|
@@ -149,8 +152,8 @@ alpha-blended, centered) instead of the label.
   alpha is honored, so it blends into the key's configured `color` instead of
   showing a black box.
 - **Size**: no fixed requirement (it's scaled to fit, letterboxed, aspect
-  preserved), but the keys are **80×80** on the Mini and **120×120** on the
-  Plus, and scaling is nearest-neighbor — downscaling a bigger image looks
+  preserved), but the keys are **72×72** on the V2, **80×80** on the Mini and **120×120**
+  on the Plus, and scaling is nearest-neighbor — downscaling a bigger image looks
   clean, upscaling a small one looks blocky. **120×120 square** is a safe
   default that downscales fine to the Mini too.
 - The source file is read into a fixed 1 MiB buffer — plenty for an icon,

@@ -17,7 +17,7 @@
 //!   <prefix>/page/set          page name or 0-based index
 //!   <prefix>/brightness/set    0-100
 //!
-//! On the Mini (6 keys, no dials, no strip) the last key is reserved as the
+//! On models without dials (Mini, 15-key V2) the last key is reserved as the
 //! page button: it shows the current page name and stays bordered.
 //!
 //! Threading: the MQTT session runs on its own thread and only writes the
@@ -91,7 +91,7 @@ const Daemon = struct {
         return self.pageCfg().dials[i] orelse self.cfg.dials[i];
     }
 
-    /// Index of the reserved page-cycle key (Mini only).
+    /// Index of the reserved page-cycle key (models without dials).
     fn pageKeyIndex(model: deck.Model) ?u8 {
         if (deck.dialCount(model) != 0) return null;
         return deck.keyCount(model) - 1;
@@ -278,7 +278,7 @@ const Daemon = struct {
         const sh = deck.stripH(self.model);
         var img = try image.Image.init(arena, sw, sh);
         img.fill(8, 8, 12);
-        if (bg) |wall| image.blitDim(&img, wall, 0, 2 * self.wall_slot_h, 40);
+        if (bg) |wall| image.blitDim(&img, wall, 0, deck.keyRows(self.model) * self.wall_slot_h, 40);
         if (unconfigured) {
             self.drawCenteredText(&img, "MQTT NOT CONFIGURED", 50, self.cfg.font_size_strip, 255, 60, 60);
         } else if (!up) {
@@ -307,7 +307,7 @@ const Daemon = struct {
         var img = try image.Image.init(arena, kpx, kpx);
         img.fill(r / 6, g / 6, b / 6);
         if (bg) |wall| {
-            const cols: usize = deck.keyCount(self.model) / 2;
+            const cols: usize = deck.keyCols(self.model);
             const sx = (key % cols) * self.wall_slot_w + (self.wall_slot_w - kpx) / 2;
             const sy = (key / cols) * self.wall_slot_h + (self.wall_slot_h - kpx) / 2;
             image.blitDim(&img, wall, sx, sy, 40);
@@ -458,7 +458,8 @@ pub fn run(io: std.Io, dev: *hid.Device, model: deck.Model, cfg: *const config.C
         d.art_topic = art_topic;
         d.art_buf = try gpa.alloc(u8, 192 * 1024);
         const kpx: usize = deck.keyPx(model);
-        const cols: usize = deck.keyCount(model) / 2;
+        const cols: usize = deck.keyCols(model);
+        const rows: usize = deck.keyRows(model);
         if (deck.hasStrip(model)) {
             d.wall_slot_w = deck.stripW(model) / cols;
             d.wall_slot_h = kpx + 20;
@@ -467,7 +468,7 @@ pub fn run(io: std.Io, dev: *hid.Device, model: deck.Model, cfg: *const config.C
             d.wall_slot_h = kpx;
         }
         const strip_h: usize = if (deck.hasStrip(model)) deck.stripH(model) else 0;
-        d.wall = try image.Image.init(gpa, cols * d.wall_slot_w, 2 * d.wall_slot_h + strip_h);
+        d.wall = try image.Image.init(gpa, cols * d.wall_slot_w, rows * d.wall_slot_h + strip_h);
     }
     for (&d.dial_vals, 0..) |*row, pi| {
         for (row, 0..) |*v, di| v.* = (cfg.pages[pi].dials[di] orelse cfg.dials[di]).turn_start;

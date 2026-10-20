@@ -5,6 +5,8 @@ const deck = @import("deck.zig");
 pub const vid = 0x0fd9;
 pub const pid_plus = 0x0084;
 pub const pid_mini = 0x00b8;
+pub const pid_v2 = 0x006d; // Stream Deck original V2 (15 keys)
+pub const pid_mk2 = 0x0080; // Stream Deck MK.2 (same protocol as the V2)
 
 pub const DeviceInfo = struct {
     path: [64]u8,
@@ -112,6 +114,9 @@ pub fn findDevice(buf: []u8) !?DeviceInfo {
             .plus
         else if (std.mem.indexOf(u8, slice, "00000FD9:000000B8") != null)
             .mini
+        else if (std.mem.indexOf(u8, slice, "00000FD9:0000006D") != null or
+            std.mem.indexOf(u8, slice, "00000FD9:00000080") != null)
+            .v2
         else
             null;
         if (model) |m| {
