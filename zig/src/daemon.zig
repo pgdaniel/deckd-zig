@@ -572,7 +572,12 @@ fn reconnect(io: std.Io, dev: *hid.Device, model: deck.Model, d: *Daemon) !void 
         std.Io.sleep(io, .fromMilliseconds(500), .awake) catch {};
         const found = hid.findDevice(&path_buf) catch continue;
         const info = found orelse continue;
-        if (info.model != model) continue;
+        if (info.model != model) {
+            // Layout, image format and protocol all depend on the model, so
+            // start over (systemd restarts us) rather than patch them live.
+            std.debug.print("a different deck ({s}) was attached — restarting\n", .{@tagName(info.model)});
+            std.process.exit(1);
+        }
         dev.* = hid.Device.open(info.path[0..info.path_len]) catch continue;
         std.debug.print("deck reconnected on {s}\n", .{info.path[0..info.path_len]});
         break;
