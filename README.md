@@ -332,3 +332,8 @@ the image into noise lines). 800×100 JPEG, no rotation needed.
 - Rewrite `deckd-config` for the pages schema
 - DNS for `mqtt_host`, TLS
 - Per-band auto-gain in soma-zig's visualizer (high bands read low)
+
+## License
+
+MIT, see [LICENSE](LICENSE). The icons in `assets/icons/` and the vendored stb
+headers keep their own licenses.
