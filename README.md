@@ -7,11 +7,24 @@ topics, and key faces, borders and strip text are drawn from topics it
 subscribes to. Nothing about any particular device is built in — matrix_sim,
 soma-zig, lights, whatever speaks MQTT, is wired up in `config.json`.
 
-Everything on the device works: the 8 LCD keys (120×120 JPEG each), the
-800×100 touch strip, and the 4 rotary encoder knobs (turn + push). The
-6-key Stream Deck Mini and the 15-key (5×3) Stream Deck original V2 / MK.2
-are supported too (no strip, no knobs). deckd drives one deck at a time and
-detects the model by USB id (Plus `0084`, Mini `00b8`, V2 `006d`, MK.2 `0080`).
+## Compatible models
+
+deckd detects the model by USB id and drives one deck at a time. Pages, keys,
+templates and backgrounds work on all of them; the strip and knobs exist only
+on the Plus.
+
+| Model | USB id (`0fd9:`) | Keys | Key size | Strip | Knobs | Status |
+|---|---|---|---|---|---|---|
+| **Stream Deck Plus** | `0084` | 8 (4×2) | 120×120 | 800×100 touch strip | 4 (turn + push) | tested on real hardware |
+| **Stream Deck Mini** | `00b8` | 6 (3×2) | 80×80 | no | no | implemented, not tested on hardware |
+| **Stream Deck original V2 / MK.2** | `006d`, `0080` | 15 (5×3) | 72×72 | no | no | implemented, not tested on hardware |
+
+Other Stream Decks (XL, Neo, Pedal, the original v1, ...) are not supported.
+On models without knobs, dial config is ignored. On the Mini and the V2 the last key is
+reserved as the page button (see below).
+
+Everything on the Plus works: the 8 LCD keys (120×120 JPEG each), the 800×100
+touch strip, and the 4 rotary encoder knobs (turn + push).
 
 ## Building
 
